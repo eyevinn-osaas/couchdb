@@ -13,7 +13,6 @@
 -module(fabric_db_delete).
 -export([go/2]).
 
--include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 
 %% @doc Options aren't used at all now in couch on delete but are left here
@@ -29,7 +28,7 @@ go(DbName, _Options) ->
         {ok, accepted} ->
             accepted;
         {ok, not_found} ->
-            erlang:error(database_does_not_exist, [DbName]);
+            error(database_does_not_exist, [DbName]);
         Error ->
             Error
     after

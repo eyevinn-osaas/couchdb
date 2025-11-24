@@ -135,7 +135,9 @@ is_usable(Idx, Selector, _) ->
             {true, #{}};
         Cols ->
             Fields = indexable_fields(Selector),
-            Usable = sets:is_subset(sets:from_list(Fields), sets:from_list(Cols)),
+            Usable = sets:is_subset(
+                couch_util:set_from_list(Fields), couch_util:set_from_list(Cols)
+            ),
             Reason = [field_mismatch || not Usable],
             Details = #{reason => Reason},
             {Usable, Details}

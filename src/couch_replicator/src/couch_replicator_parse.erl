@@ -488,14 +488,27 @@ ssl_params(Url) ->
 
 -spec ssl_verify_options(true | false) -> [_].
 ssl_verify_options(true) ->
-    CAFile = cfg("ssl_trusted_certificates_file"),
-    [
-        {verify, verify_peer},
-        {customize_hostname_check, [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]},
-        {cacertfile, CAFile}
-    ];
+    % https://security.erlef.org/secure_coding_and_deployment_hardening/ssl.html
+    ssl_ca_cert_opts() ++
+        [
+            {verify, verify_peer},
+            {customize_hostname_check, [
+                {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
+            ]}
+        ];
 ssl_verify_options(false) ->
     [{verify, verify_none}].
+
+ssl_ca_cert_opts() ->
+    % Try to use the CA cert file from config first, and if not specified, use
+    % the CA certificates from the OS. If those can't be loaded either, then
+    % crash: cacerts_get/0 raises an error in that case and we do not catch it.
+    case cfg("ssl_trusted_certificates_file") of
+        undefined ->
+            [{cacerts, public_key:cacerts_get()}];
+        CAFile when is_list(CAFile) ->
+            [{cacertfile, CAFile}]
+    end.
 
 get_value(Key, Props) ->
     couch_util:get_value(Key, Props).
@@ -701,8 +714,8 @@ t_parse_db_url(_) ->
 
 t_parse_db_invalid_protocol(_) ->
     MeckFun = fun
-        ("replicator", "valid_endpoint_protocols", _) -> "https";
-        (_, _, Default) -> Default
+        ("replicator", "valid_endpoint_protocols") -> "https";
+        (K, V) -> meck:passthrough([K, V])
     end,
     meck:expect(config, get, MeckFun),
     PUrl = <<"http://x">>,
@@ -717,8 +730,8 @@ t_parse_db_invalid_protocol(_) ->
 
 t_parse_proxy_invalid_protocol(_) ->
     MeckFun = fun
-        ("replicator", "valid_proxy_protocols", _) -> "socks5";
-        (_, _, Default) -> Default
+        ("replicator", "valid_proxy_protocols") -> "socks5";
+        (K, V) -> meck:passthrough([K, V])
     end,
     meck:expect(config, get, MeckFun),
     Url = <<"http://a">>,

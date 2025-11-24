@@ -319,20 +319,21 @@ copy_meta(#state{source_db = SourceDb, targets = Targets} = State) ->
     RevsLimit = couch_db:get_revs_limit(SourceDb),
     {SecProps} = couch_db:get_security(SourceDb),
     PurgeLimit = couch_db:get_purge_infos_limit(SourceDb),
+    TimeSeq = couch_db:get_time_seq(SourceDb),
     Targets1 = maps:map(
         fun(_, #target{db = Db} = T) ->
             {ok, Db1} = couch_db_engine:set_revs_limit(Db, RevsLimit),
             {ok, Db2} = couch_db_engine:set_security(Db1, SecProps),
             {ok, Db3} = couch_db_engine:set_purge_infos_limit(Db2, PurgeLimit),
-            T#target{db = Db3}
+            {ok, Db4} = couch_db_engine:set_time_seq(Db3, TimeSeq),
+            T#target{db = Db4}
         end,
         Targets
     ),
     State#state{targets = Targets1}.
 
 copy_purge_info(#state{source_db = Db} = State) ->
-    Seq = max(0, couch_db:get_oldest_purge_seq(Db) - 1),
-    {ok, NewState} = couch_db:fold_purge_infos(Db, Seq, fun purge_cb/2, State),
+    {ok, NewState} = couch_db:fold_purge_infos(Db, fun purge_cb/2, State),
     Targets = maps:map(
         fun(_, #target{} = T) ->
             commit_purge_infos(T)

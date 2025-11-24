@@ -36,16 +36,16 @@ end.
 CouchJSPath = filename:join(["priv", CouchJSName]).
 Version = case os:getenv("COUCHDB_VERSION") of
     false ->
-        string:strip(os:cmd("git describe --always"), right, $\n);
+        string:trim(os:cmd("git describe --always"));
     Version0 ->
-        string:strip(Version0, right)
+        string:trim(Version0)
 end.
 
 GitSha = case os:getenv("COUCHDB_GIT_SHA") of
     false ->
         ""; % release builds won\'t get a fallback
     GitSha0 ->
-        string:strip(GitSha0, right)
+        string:trim(GitSha0)
 end.
 
 CouchConfig = case filelib:is_file(os:getenv("COUCHDB_CONFIG")) of
@@ -91,6 +91,12 @@ SMVsn = case lists:keyfind(spidermonkey_version, 1, CouchConfig) of
         "86";
     {_, "91"} ->
         "91";
+    {_, "102"} ->
+        "102";
+    {_, "115"} ->
+        "115";
+    {_, "128"} ->
+        "128";
     undefined ->
         "91";
     {_, Unsupported} ->
@@ -117,6 +123,12 @@ CouchJSConfig = case SMVsn of
         "priv/couch_js/86/config.h";
     "91" ->
         "priv/couch_js/86/config.h";
+    "102" ->
+        "priv/couch_js/102/config.h";
+    "115" ->
+        "priv/couch_js/102/config.h";
+    "128" ->
+        "priv/couch_js/102/config.h";
     _ ->
         "priv/couch_js/" ++ SMVsn ++ "/config.h"
 end.
@@ -137,6 +149,25 @@ end.
 ProperConfig = case code:lib_dir(proper) of
     {error, bad_name} -> [];
     _ -> [{d, 'WITH_PROPER'}]
+end.
+
+DpkgArchitectureCmd = "dpkg-architecture -q DEB_HOST_MULTIARCH".
+GenericMozJSIncludePaths = "-I/usr/include/mozjs-" ++ SMVsn ++ " -I/usr/local/include/mozjs-" ++ SMVsn.
+GenericMozJSLibPaths = "-L/usr/local/lib".
+
+WithDpkgArchitecture = os:find_executable("dpkg-architecture") /= false.
+WithHomebrew = os:find_executable("brew") /= false.
+
+MozJSIncludePath = case {WithDpkgArchitecture, WithHomebrew} of
+    {false, false} -> GenericMozJSIncludePaths;
+    {true, false} -> GenericMozJSIncludePaths ++ " -I/usr/include/" ++ string:trim(os:cmd(DpkgArchitectureCmd)) ++ "/mozjs-" ++ SMVsn;
+    {false, true} -> GenericMozJSIncludePaths ++ " -I/opt/homebrew/include/mozjs-" ++ SMVsn
+end.
+
+MozJSLibPath = case {WithDpkgArchitecture, WithHomebrew} of
+    {false, false} -> GenericMozJSLibPaths;
+    {true, false} -> GenericMozJSLibPaths ++ " -L/usr/lib/" ++ string:trim(os:cmd(DpkgArchitectureCmd));
+    {false, true} -> GenericMozJSLibPaths ++ " -L/opt/homebrew/lib"
 end.
 
 % The include directories (parameters for the `-I` C compiler flag) are
@@ -183,15 +214,20 @@ end.
             "-DXP_UNIX -I/usr/include/mozjs-86 -I/usr/local/include/mozjs-86 -I/opt/homebrew/include/mozjs-86/ -std=c++17 -Wno-invalid-offsetof",
             "-L/usr/local/lib -L /opt/homebrew/lib/ -std=c++17 -lmozjs-86 -lm"
         };
-    {unix, _} when SMVsn == "91" ->
+    {unix, _} when SMVsn == "91"; SMVsn == "102"; SMVsn == "115"; SMVsn == "128" ->
         {
-            "$CFLAGS -DXP_UNIX -I/usr/include/mozjs-91 -I/usr/local/include/mozjs-91 -I/opt/homebrew/include/mozjs-91/ -std=c++17 -Wno-invalid-offsetof",
-            "$LDFLAGS -L/usr/local/lib -L /opt/homebrew/lib/ -std=c++17 -lmozjs-91 -lm"
+            "$CFLAGS -DXP_UNIX " ++ MozJSIncludePath ++ " -std=c++17 -Wno-invalid-offsetof",
+            "$LDFLAGS " ++ MozJSLibPath ++ " -std=c++17 -lm -lmozjs-" ++ SMVsn
         };
     {win32, _} when SMVsn == "91" ->
         {
             "/std:c++17 /DXP_WIN",
             "$LDFLAGS mozjs-91.lib"
+        };
+    {win32, _} when SMVsn == "102"; SMVsn == "115"; SMVsn == "128" ->
+        {
+            "/std:c++17 /DXP_WIN /Zc:preprocessor /utf-8",
+            "$LDFLAGS mozjs-" ++ SMVsn ++ ".lib"
         }
 end.
 
@@ -201,7 +237,10 @@ CouchJSSrc = case SMVsn of
     "68" -> ["priv/couch_js/68/*.cpp"];
     "78" -> ["priv/couch_js/86/*.cpp"];
     "86" -> ["priv/couch_js/86/*.cpp"];
-    "91" -> ["priv/couch_js/86/*.cpp"]
+    "91" -> ["priv/couch_js/86/*.cpp"];
+    "102" -> ["priv/couch_js/102/*.cpp"];
+    "115" -> ["priv/couch_js/102/*.cpp"];
+    "128" -> ["priv/couch_js/102/*.cpp"]
 end.
 
 CouchJSEnv = case SMVsn of
@@ -217,12 +256,31 @@ CouchJSEnv = case SMVsn of
         ]
 end.
 
+BrewIcuPrefixCmd = "brew --prefix icu4c".
+GenericIcuIncludePaths = "-I/usr/local/opt/icu4c/include -I/opt/homebrew/opt/icu4c/include".
+GenericIcuLibPaths = "-L/usr/local/opt/icu4c/lib -L/opt/homebrew/opt/icu4c/lib".
+
+WithBrew = case os:find_executable("brew") of
+    false -> false;
+    _ -> true
+end.
+
+IcuIncludePath = case WithBrew of
+    false -> GenericIcuIncludePaths;
+    true -> "-I" ++ string:trim(os:cmd(BrewIcuPrefixCmd)) ++ "/include"
+end.
+
+IcuLibPath = case WithBrew of
+    false -> GenericIcuLibPaths;
+    true -> "-L" ++ string:trim(os:cmd(BrewIcuPrefixCmd)) ++ "/lib"
+end.
+
 IcuEnv = [{"DRV_CFLAGS",  "$DRV_CFLAGS -DPIC -O2 -fno-common"},
           {"DRV_LDFLAGS", "$DRV_LDFLAGS -lm -licuuc -licudata -licui18n -lpthread"},
           {"LDFLAGS", "$LDFLAGS"},
           {"CFLAGS", "$CFLAGS"}].
-IcuDarwinEnv = [{"CFLAGS", "-DXP_UNIX -I/usr/local/opt/icu4c/include -I/opt/homebrew/opt/icu4c/include"},
-                {"LDFLAGS", "-L/usr/local/opt/icu4c/lib -L/opt/homebrew/opt/icu4c/lib"}].
+IcuDarwinEnv = [{"CFLAGS", "-DXP_UNIX " ++ IcuIncludePath},
+                {"LDFLAGS", IcuLibPath}].
 IcuBsdEnv = [{"CFLAGS", "-DXP_UNIX -I/usr/local/include"},
              {"LDFLAGS", "-L/usr/local/lib"}].
 IcuWinEnv = [{"CFLAGS", "$DRV_CFLAGS /DXP_WIN"},
@@ -230,6 +288,10 @@ IcuWinEnv = [{"CFLAGS", "$DRV_CFLAGS /DXP_WIN"},
 
 ComparePath = "priv/couch_ejson_compare.so".
 CompareSrc = ["priv/couch_ejson_compare/*.c"].
+
+CouchCFileEnv = [{"CFLAGS", "$CFLAGS -Wall -Werror -DNDEBUG -O3"}].
+CouchCFilePath = "priv/couch_cfile.so".
+CouchCFileSrc = ["priv/couch_cfile/*.c"].
 
 SpidermonkeySpecs = case WithSpidermonkey of
     true -> [{".*", CouchJSPath, CouchJSSrc, [{env, CouchJSEnv}]}];
@@ -241,7 +303,9 @@ PortSpecs = SpidermonkeySpecs ++ [
         {"darwin", ComparePath, CompareSrc, [{env, IcuEnv ++ IcuDarwinEnv}]},
         {"linux",  ComparePath, CompareSrc, [{env, IcuEnv}]},
         {"bsd",   ComparePath, CompareSrc, [{env, IcuEnv ++ IcuBsdEnv}]},
-        {"win32",  ComparePath, CompareSrc, [{env, IcuWinEnv}]}
+        {"win32",  ComparePath, CompareSrc, [{env, IcuWinEnv}]},
+        {"(linux|bsd|darwin)", CouchCFilePath, CouchCFileSrc, [{env, CouchCFileEnv}]},
+        {"win32",  CouchCFilePath, CouchCFileSrc, []}
 ].
 
 %% hack required until switch to enc/rebar3

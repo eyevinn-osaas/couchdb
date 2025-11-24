@@ -13,7 +13,6 @@
 -module(fabric_db_create).
 -export([go/2]).
 
--include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
 
@@ -158,11 +157,7 @@ make_document([#shard{dbname = DbName} | _] = Shards, Suffix, Options) ->
     {RawOut, ByNodeOut, ByRangeOut} =
         lists:foldl(
             fun(#shard{node = N, range = [B, E]}, {Raw, ByNode, ByRange}) ->
-                Range = ?l2b([
-                    couch_util:to_hex(<<B:32/integer>>),
-                    "-",
-                    couch_util:to_hex(<<E:32/integer>>)
-                ]),
+                Range = mem3_util:range_to_hex([B, E]),
                 Node = couch_util:to_binary(N),
                 {
                     [[<<"add">>, Range, Node] | Raw],
@@ -221,15 +216,15 @@ db_exists_for_existing_db() ->
     Mock = fun(DbName) when is_binary(DbName) ->
         [#shard{dbname = DbName, range = [0, 100]}]
     end,
-    ok = meck:expect(mem3, shards, Mock),
+    meck:expect(mem3, shards, Mock),
     ?assertEqual(true, db_exists(<<"foobar">>)),
     ?assertEqual(true, meck:validate(mem3)).
 
 db_exists_for_missing_db() ->
     Mock = fun(DbName) ->
-        erlang:error(database_does_not_exist, [DbName])
+        error(database_does_not_exist, [DbName])
     end,
-    ok = meck:expect(mem3, shards, Mock),
+    meck:expect(mem3, shards, Mock),
     ?assertEqual(false, db_exists(<<"foobar">>)),
     ?assertEqual(false, meck:validate(mem3)).
 

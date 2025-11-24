@@ -152,6 +152,9 @@ that the main task of reduce functions is to *reduce* the mapped result, not to
 make it bigger. Generally, your reduce function should converge rapidly to a
 single value - which could be an array or similar object.
 
+Set ``reduce_limit`` to ``log`` so views which would crash if the setting were
+``true`` would instead return the result and log an ``info`` level warning.
+
 .. _reducefun/builtin:
 
 Built-in Reduce Functions
@@ -160,6 +163,37 @@ Built-in Reduce Functions
 Additionally, CouchDB has a set of built-in reduce functions. These are
 implemented in Erlang and run inside CouchDB, so they are much faster than the
 equivalent JavaScript functions.
+
+.. data:: _first
+
+.. versionadded:: 3.5
+
+Return the value of the first row in group. For example, for a view like
+``[a,1] : x, [a,2] : y``, queried with ``group_level=1``, it would return ``[a]
+: x``.
+
+.. data:: _last
+
+.. versionadded:: 3.5
+
+Return the value of the last row in group. For example, for a view like
+``[a,1] : x, [a,2] : y``, queried with ``group_level=1``, it would return ``[a]
+: y``.
+
+.. data:: _top_N
+
+.. versionadded:: 3.5
+
+Top ``N`` values, where ``N`` can be any number between ``1`` and ``100``
+inclusive. For instance, ``_top_5`` returns the list of the top 5 values.
+
+.. data:: _bottom_N
+
+.. versionadded:: 3.5
+
+Bottom ``N`` values where ``N`` can be any number between ``1`` and ``100``
+inclusive. For instance, ``_bottom_10`` returns the list of the bottom 10
+values.
 
 .. data:: _approx_count_distinct
 

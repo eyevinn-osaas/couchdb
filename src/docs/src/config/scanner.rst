@@ -85,6 +85,25 @@ Scanner Options
             [couch_scanner]
             doc_rate_limit = 1000
 
+    .. config:option:: doc_write_rate_limit
+
+        Limit the rate at which plugins update documents. This rate limit
+        applies to plugins which explicitly use the
+        ``couch_scanner_rate_limiter`` module for rate limiting ::
+
+            [couch_scanner]
+            doc_write_rate_limit = 500
+
+    .. config:option:: ddoc_batch_size
+
+        Batch size to use when fetching design documents. For lots of small
+        design documents this value could be increased to 500 or 1000. If
+        design documents are large (100KB+) it could make sense to decrease it
+        a bit to 25 or 10. ::
+
+            [couch_scanner]
+            ddoc_batch_size = 100
+
 .. config:section:: couch_scanner_plugins :: Enable Scanner Plugins
 
     .. config:option:: {plugin}
@@ -230,3 +249,17 @@ settings in their ``[{plugin}]`` section.
 
             [couch_scanner_plugin_ddoc_features]
             ddoc_report = false
+
+.. _config/auto_purge_plugin:
+
+.. config:section:: couch_auto_purge_plugin :: Configure the Auto Purge plugin
+
+    .. config:option:: deleted_document_ttl
+
+        Set the default interval before the plugin will purge
+        a deleted document. Possible ttl formats are: ``{num}_{timeunit}`` (ex.:
+        ``1000_sec``, ``30_min``, ``8_hours``, ``24_hour``, ``2_days``,
+        ``3_weeks``, ``1_month``).
+        The database may override this setting with the
+        :ref:`api/db/auto_purge` endpoint. If neither is set, the
+        plugin will not purge deleted documents.

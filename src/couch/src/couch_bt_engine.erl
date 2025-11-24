@@ -30,8 +30,6 @@
     decref/1,
     monitored_by/1,
 
-    last_activity/1,
-
     get_compacted_seq/1,
     get_del_doc_count/1,
     get_disk_version/1,
@@ -65,6 +63,9 @@
     write_doc_infos/3,
     purge_docs/3,
     copy_purge_infos/2,
+
+    get_time_seq/1,
+    set_time_seq/2,
 
     commit_data/1,
 
@@ -115,6 +116,20 @@
 -include_lib("kernel/include/file.hrl").
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_bt_engine.hrl").
+
+% Commonly used header fields (used more than once in this module)
+-define(UPDATE_SEQ, update_seq).
+-define(SECURITY_PTR, security_ptr).
+-define(PROPS_PTR, props_ptr).
+-define(REVS_LIMIT, revs_limit).
+-define(PURGE_INFOS_LIMIT, purge_infos_limit).
+-define(COMPACTED_SEQ, compacted_seq).
+-define(TIME_SEQ_PTR, time_seq_ptr).
+
+-define(DEFAULT_BTREE_CACHE_DEPTH, 3).
+% Priority is about how long the entry will survive in the cache initially. A
+% period is about 2 seconds and each period the value is halved.
+-define(HEADER_CACHE_PRIORITY, 16).
 
 exists(FilePath) ->
     case is_file(FilePath) of
@@ -198,25 +213,22 @@ handle_db_updater_info({'DOWN', Ref, _, _, _}, #st{fd_monitor = Ref} = St) ->
     {stop, normal, St#st{fd = undefined, fd_monitor = closed}}.
 
 incref(St) ->
-    {ok, St#st{fd_monitor = erlang:monitor(process, St#st.fd)}}.
+    {ok, St#st{fd_monitor = monitor(process, St#st.fd)}}.
 
 decref(St) ->
-    true = erlang:demonitor(St#st.fd_monitor, [flush]),
+    true = demonitor(St#st.fd_monitor, [flush]),
     ok.
 
 monitored_by(St) ->
-    case erlang:process_info(St#st.fd, monitored_by) of
+    case process_info(St#st.fd, monitored_by) of
         {monitored_by, Pids} ->
             lists:filter(fun is_pid/1, Pids);
         _ ->
             []
     end.
 
-last_activity(#st{fd = Fd}) ->
-    couch_file:last_read(Fd).
-
 get_compacted_seq(#st{header = Header}) ->
-    couch_bt_engine_header:get(Header, compacted_seq).
+    couch_bt_engine_header:get(Header, ?COMPACTED_SEQ).
 
 get_del_doc_count(#st{} = St) ->
     {ok, Reds} = couch_btree:full_reduce(St#st.id_tree),
@@ -247,10 +259,10 @@ get_oldest_purge_seq(#st{purge_seq_tree = PurgeSeqTree}) ->
     PurgeSeq.
 
 get_purge_infos_limit(#st{header = Header}) ->
-    couch_bt_engine_header:get(Header, purge_infos_limit).
+    couch_bt_engine_header:get(Header, ?PURGE_INFOS_LIMIT).
 
 get_revs_limit(#st{header = Header}) ->
-    couch_bt_engine_header:get(Header, revs_limit).
+    couch_bt_engine_header:get(Header, ?REVS_LIMIT).
 
 get_size_info(#st{} = St) ->
     {ok, FileSize} = couch_file:bytes(St#st.fd),
@@ -310,26 +322,19 @@ get_partition_info(#st{} = St, Partition) ->
         ]}
     ].
 
-get_security(#st{header = Header} = St) ->
-    case couch_bt_engine_header:get(Header, security_ptr) of
-        undefined ->
-            [];
-        Pointer ->
-            {ok, SecProps} = couch_file:pread_term(St#st.fd, Pointer),
-            SecProps
-    end.
+get_security(#st{} = St) ->
+    get_header_term(St, ?SECURITY_PTR, []).
 
-get_props(#st{header = Header} = St) ->
-    case couch_bt_engine_header:get(Header, props_ptr) of
-        undefined ->
-            [];
-        Pointer ->
-            {ok, Props} = couch_file:pread_term(St#st.fd, Pointer),
-            Props
-    end.
+get_props(#st{} = St) ->
+    get_header_term(St, ?PROPS_PTR, []).
+
+get_time_seq(#st{} = St) ->
+    TSeq = get_header_term(St, ?TIME_SEQ_PTR, couch_time_seq:new()),
+    % This may upgrade the data structure to a new version
+    couch_time_seq:new(TSeq).
 
 get_update_seq(#st{header = Header}) ->
-    couch_bt_engine_header:get(Header, update_seq).
+    couch_bt_engine_header:get(Header, ?UPDATE_SEQ).
 
 get_uuid(#st{header = Header}) ->
     couch_bt_engine_header:get(Header, uuid).
@@ -337,7 +342,7 @@ get_uuid(#st{header = Header}) ->
 set_revs_limit(#st{header = Header} = St, RevsLimit) ->
     NewSt = St#st{
         header = couch_bt_engine_header:set(Header, [
-            {revs_limit, RevsLimit}
+            {?REVS_LIMIT, RevsLimit}
         ]),
         needs_commit = true
     },
@@ -346,33 +351,26 @@ set_revs_limit(#st{header = Header} = St, RevsLimit) ->
 set_purge_infos_limit(#st{header = Header} = St, PurgeInfosLimit) ->
     NewSt = St#st{
         header = couch_bt_engine_header:set(Header, [
-            {purge_infos_limit, PurgeInfosLimit}
+            {?PURGE_INFOS_LIMIT, PurgeInfosLimit}
         ]),
         needs_commit = true
     },
     {ok, increment_update_seq(NewSt)}.
 
-set_security(#st{header = Header} = St, NewSecurity) ->
-    Options = [{compression, St#st.compression}],
-    {ok, Ptr, _} = couch_file:append_term(St#st.fd, NewSecurity, Options),
-    NewSt = St#st{
-        header = couch_bt_engine_header:set(Header, [
-            {security_ptr, Ptr}
-        ]),
-        needs_commit = true
-    },
-    {ok, increment_update_seq(NewSt)}.
+set_security(#st{} = St, NewSecurity) ->
+    {ok, increment_update_seq(set_header_term(St, ?SECURITY_PTR, NewSecurity))}.
 
-set_props(#st{header = Header} = St, Props) ->
-    Options = [{compression, St#st.compression}],
-    {ok, Ptr, _} = couch_file:append_term(St#st.fd, Props, Options),
-    NewSt = St#st{
-        header = couch_bt_engine_header:set(Header, [
-            {props_ptr, Ptr}
-        ]),
-        needs_commit = true
-    },
-    {ok, increment_update_seq(NewSt)}.
+set_props(#st{} = St, Props) ->
+    {ok, increment_update_seq(set_header_term(St, ?PROPS_PTR, Props))}.
+
+set_time_seq(#st{} = St, TSeq) ->
+    % Expect this to not change very often to make sure to
+    % only update it if it's actual value changed
+    OldTSeq = get_time_seq(St),
+    case TSeq =:= OldTSeq of
+        true -> {ok, St};
+        false -> {ok, set_header_term(St, ?TIME_SEQ_PTR, TSeq)}
+    end.
 
 open_docs(#st{} = St, DocIds) ->
     Results = couch_btree:lookup(St#st.id_tree, DocIds),
@@ -485,14 +483,14 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs) ->
 
     NewUpdateSeq = lists:foldl(
         fun(#full_doc_info{update_seq = Seq}, Acc) ->
-            erlang:max(Seq, Acc)
+            max(Seq, Acc)
         end,
         get_update_seq(St),
         Add
     ),
 
     NewHeader = couch_bt_engine_header:set(St#st.header, [
-        {update_seq, NewUpdateSeq}
+        {?UPDATE_SEQ, NewUpdateSeq}
     ]),
 
     {ok, St#st{
@@ -514,7 +512,7 @@ purge_docs(#st{} = St, Pairs, PurgeInfos) ->
     RemDocIds = [Old#full_doc_info.id || {Old, not_found} <- Pairs],
     RemSeqs = [Old#full_doc_info.update_seq || {Old, _} <- Pairs],
     DocsToAdd = [New || {_, New} <- Pairs, New /= not_found],
-    CurrSeq = couch_bt_engine_header:get(St#st.header, update_seq),
+    CurrSeq = couch_bt_engine_header:get(St#st.header, ?UPDATE_SEQ),
     Seqs = [FDI#full_doc_info.update_seq || FDI <- DocsToAdd],
     NewSeq = lists:max([CurrSeq | Seqs]),
 
@@ -527,7 +525,7 @@ purge_docs(#st{} = St, Pairs, PurgeInfos) ->
             false -> NewSeq
         end,
     Header = couch_bt_engine_header:set(St#st.header, [
-        {update_seq, UpdateSeq}
+        {?UPDATE_SEQ, UpdateSeq}
     ]),
 
     {ok, IdTree2} = couch_btree:add_remove(IdTree, DocsToAdd, RemDocIds),
@@ -567,9 +565,7 @@ commit_data(St) ->
 
     case NewHeader /= OldHeader orelse NeedsCommit of
         true ->
-            couch_file:sync(Fd),
-            ok = couch_file:write_header(Fd, NewHeader),
-            couch_file:sync(Fd),
+            ok = couch_file:write_header(Fd, NewHeader, [sync]),
             couch_stats:increment_counter([couchdb, commits]),
             {ok, St#st{
                 header = NewHeader,
@@ -611,9 +607,16 @@ fold_purge_infos(St, StartSeq0, UserFun, UserAcc, Options) ->
     PurgeSeqTree = St#st.purge_seq_tree,
     StartSeq = StartSeq0 + 1,
     MinSeq = get_oldest_purge_seq(St),
+    % MinSeq check ensures that an index did not (somehow) miss any purges and
+    % is now out of sync with the database. Index updaters should catch the
+    % {invalid_start_purge_seq, _, _} error and reset the index. Because of
+    % this when fetching all the purges it's necessary to use max(0,
+    % couch_db:get_oldest_purge_seq(Db) - 1) as the start sequence or the
+    % couch_db:fold_purge_infos(Db, Fun, Acc) helper, which does that
+    % automatically.
     if
         MinSeq =< StartSeq -> ok;
-        true -> erlang:error({invalid_start_purge_seq, StartSeq0})
+        true -> error({invalid_start_purge_seq, StartSeq0, MinSeq})
     end,
     Wrapper = fun(Info, _Reds, UAcc) ->
         UserFun(Info, UAcc)
@@ -802,30 +805,16 @@ purge_tree_reduce(rereduce, Reds) ->
 set_update_seq(#st{header = Header} = St, UpdateSeq) ->
     {ok, St#st{
         header = couch_bt_engine_header:set(Header, [
-            {update_seq, UpdateSeq}
+            {?UPDATE_SEQ, UpdateSeq}
         ]),
         needs_commit = true
     }}.
 
-copy_security(#st{header = Header} = St, SecProps) ->
-    Options = [{compression, St#st.compression}],
-    {ok, Ptr, _} = couch_file:append_term(St#st.fd, SecProps, Options),
-    {ok, St#st{
-        header = couch_bt_engine_header:set(Header, [
-            {security_ptr, Ptr}
-        ]),
-        needs_commit = true
-    }}.
+copy_security(#st{} = St, SecProps) ->
+    {ok, set_header_term(St, ?SECURITY_PTR, SecProps)}.
 
-copy_props(#st{header = Header} = St, Props) ->
-    Options = [{compression, St#st.compression}],
-    {ok, Ptr, _} = couch_file:append_term(St#st.fd, Props, Options),
-    {ok, St#st{
-        header = couch_bt_engine_header:set(Header, [
-            {props_ptr, Ptr}
-        ]),
-        needs_commit = true
-    }}.
+copy_props(#st{} = St, Props) ->
+    {ok, set_header_term(St, ?PROPS_PTR, Props)}.
 
 open_db_file(FilePath, Options) ->
     case couch_file:open(FilePath, Options) of
@@ -862,7 +851,8 @@ init_state(FilePath, Fd, Header0, Options) ->
         {split, fun ?MODULE:id_tree_split/1},
         {join, fun ?MODULE:id_tree_join/2},
         {reduce, fun ?MODULE:id_tree_reduce/2},
-        {compression, Compression}
+        {compression, Compression},
+        {cache_depth, btree_cache_depth()}
     ]),
 
     SeqTreeState = couch_bt_engine_header:seq_tree_state(Header),
@@ -870,28 +860,32 @@ init_state(FilePath, Fd, Header0, Options) ->
         {split, fun ?MODULE:seq_tree_split/1},
         {join, fun ?MODULE:seq_tree_join/2},
         {reduce, fun ?MODULE:seq_tree_reduce/2},
-        {compression, Compression}
+        {compression, Compression},
+        {cache_depth, btree_cache_depth()}
     ]),
 
     LocalTreeState = couch_bt_engine_header:local_tree_state(Header),
     {ok, LocalTree} = couch_btree:open(LocalTreeState, Fd, [
         {split, fun ?MODULE:local_tree_split/1},
         {join, fun ?MODULE:local_tree_join/2},
-        {compression, Compression}
+        {compression, Compression},
+        {cache_depth, btree_cache_depth()}
     ]),
 
     PurgeTreeState = couch_bt_engine_header:purge_tree_state(Header),
     {ok, PurgeTree} = couch_btree:open(PurgeTreeState, Fd, [
         {split, fun ?MODULE:purge_tree_split/1},
         {join, fun ?MODULE:purge_tree_join/2},
-        {reduce, fun ?MODULE:purge_tree_reduce/2}
+        {reduce, fun ?MODULE:purge_tree_reduce/2},
+        {cache_depth, btree_cache_depth()}
     ]),
 
     PurgeSeqTreeState = couch_bt_engine_header:purge_seq_tree_state(Header),
     {ok, PurgeSeqTree} = couch_btree:open(PurgeSeqTreeState, Fd, [
         {split, fun ?MODULE:purge_seq_tree_split/1},
         {join, fun ?MODULE:purge_seq_tree_join/2},
-        {reduce, fun ?MODULE:purge_tree_reduce/2}
+        {reduce, fun ?MODULE:purge_tree_reduce/2},
+        {cache_depth, btree_cache_depth()}
     ]),
 
     ok = couch_file:set_db_pid(Fd, self()),
@@ -899,7 +893,7 @@ init_state(FilePath, Fd, Header0, Options) ->
     St = #st{
         filepath = FilePath,
         fd = Fd,
-        fd_monitor = erlang:monitor(process, Fd),
+        fd_monitor = monitor(process, Fd),
         header = Header,
         needs_commit = false,
         id_tree = IdTree,
@@ -931,22 +925,20 @@ update_header(St, Header) ->
     ]).
 
 increment_update_seq(#st{header = Header} = St) ->
-    UpdateSeq = couch_bt_engine_header:get(Header, update_seq),
+    UpdateSeq = couch_bt_engine_header:get(Header, ?UPDATE_SEQ),
     St#st{
         header = couch_bt_engine_header:set(Header, [
-            {update_seq, UpdateSeq + 1}
+            {?UPDATE_SEQ, UpdateSeq + 1}
         ])
     }.
 
 set_default_security_object(Fd, Header, Compression, Options) ->
-    case couch_bt_engine_header:get(Header, security_ptr) of
+    case couch_bt_engine_header:get(Header, ?SECURITY_PTR) of
         Pointer when is_integer(Pointer) ->
             Header;
         _ ->
             Default = couch_util:get_value(default_security_object, Options),
-            AppendOpts = [{compression, Compression}],
-            {ok, Ptr, _} = couch_file:append_term(Fd, Default, AppendOpts),
-            couch_bt_engine_header:set(Header, security_ptr, Ptr)
+            set_header_term(Fd, Header, ?SECURITY_PTR, Default, Compression)
     end.
 
 % This function is here, and not in couch_bt_engine_header
@@ -1013,9 +1005,7 @@ init_set_props(Fd, Header, Options) ->
             Header;
         InitialProps ->
             Compression = couch_compress:get_compression_method(),
-            AppendOpts = [{compression, Compression}],
-            {ok, Ptr, _} = couch_file:append_term(Fd, InitialProps, AppendOpts),
-            couch_bt_engine_header:set(Header, props_ptr, Ptr)
+            set_header_term(Fd, Header, ?PROPS_PTR, InitialProps, Compression)
     end.
 
 delete_compaction_files(FilePath) ->
@@ -1175,7 +1165,6 @@ finish_compaction_int(#st{} = OldSt, #st{} = NewSt1) ->
     } = OldSt,
     #st{
         filepath = CompactDataPath,
-        header = Header,
         local_tree = NewLocal1
     } = NewSt1,
 
@@ -1186,11 +1175,14 @@ finish_compaction_int(#st{} = OldSt, #st{} = NewSt1) ->
     {ok, _, LocalDocs} = couch_btree:foldl(OldLocal, LoadFun, []),
     {ok, NewLocal2} = couch_btree:add(NewLocal1, LocalDocs),
 
-    {ok, NewSt2} = commit_data(NewSt1#st{
-        header = couch_bt_engine_header:set(Header, [
-            {compacted_seq, get_update_seq(OldSt)},
-            {revs_limit, get_revs_limit(OldSt)},
-            {purge_infos_limit, get_purge_infos_limit(OldSt)}
+    % copy time_seq structure to get the most recent version of it
+    {ok, NewSt2} = set_time_seq(NewSt1, get_time_seq(OldSt)),
+
+    {ok, NewSt3} = commit_data(NewSt2#st{
+        header = couch_bt_engine_header:set(NewSt2#st.header, [
+            {?COMPACTED_SEQ, get_update_seq(OldSt)},
+            {?REVS_LIMIT, get_revs_limit(OldSt)},
+            {?PURGE_INFOS_LIMIT, get_purge_infos_limit(OldSt)}
         ]),
         local_tree = NewLocal2
     }),
@@ -1216,7 +1208,7 @@ finish_compaction_int(#st{} = OldSt, #st{} = NewSt1) ->
 
     % And return our finished new state
     {ok,
-        NewSt2#st{
+        NewSt3#st{
             filepath = FilePath
         },
         undefined}.
@@ -1227,3 +1219,44 @@ is_file(Path) ->
         {ok, #file_info{type = directory}} -> true;
         _ -> false
     end.
+
+get_header_term(#st{header = Header} = St, Key, Default) when is_atom(Key) ->
+    case couch_bt_engine_header:get(Header, Key) of
+        undefined ->
+            Default;
+        Pointer when is_integer(Pointer) ->
+            case couch_bt_engine_cache:lookup({St#st.fd, Pointer}) of
+                undefined ->
+                    {ok, Term} = couch_file:pread_term(St#st.fd, Pointer),
+                    couch_bt_engine_cache:insert({St#st.fd, Pointer}, Term, ?HEADER_CACHE_PRIORITY),
+                    Term;
+                Term ->
+                    Term
+            end
+    end.
+
+set_header_term(#st{} = St, Key, Term) when is_atom(Key) ->
+    #st{fd = Fd, header = Header, compression = Compression} = St,
+    St#st{
+        header = set_header_term(Fd, Header, Key, Term, Compression),
+        needs_commit = true
+    }.
+
+set_header_term(Fd, Header, Key, Term, Compression) when is_atom(Key) ->
+    case couch_bt_engine_header:get(Header, Key) of
+        Pointer when is_integer(Pointer) ->
+            % Reset old one to 0 usage. Some old snapshot may still
+            % see it and use. But it will only survive only one more
+            % interval at most otherwise
+            couch_bt_engine_cache:reset({Fd, Pointer});
+        _ ->
+            ok
+    end,
+    TermOpts = [{compression, Compression}],
+    {ok, Ptr, _} = couch_file:append_term(Fd, Term, TermOpts),
+    Result = couch_bt_engine_header:set(Header, Key, Ptr),
+    couch_bt_engine_cache:insert({Fd, Ptr}, Term, ?HEADER_CACHE_PRIORITY),
+    Result.
+
+btree_cache_depth() ->
+    config:get_integer("bt_engine_cache", "db_btree_cache_depth", ?DEFAULT_BTREE_CACHE_DEPTH).

@@ -198,8 +198,8 @@ spawn_worker_cleaner(Coordinator, Workers, ClientReq) when
     case get(?WORKER_CLEANER) of
         undefined ->
             Pid = spawn(fun() ->
-                erlang:monitor(process, Coordinator),
-                NodeRefSet = set_from_list(shards_to_node_refs(Workers)),
+                monitor(process, Coordinator),
+                NodeRefSet = couch_util:set_from_list(shards_to_node_refs(Workers)),
                 cleaner_loop(Coordinator, NodeRefSet, ClientReq)
             end),
             put(?WORKER_CLEANER, Pid),
@@ -227,9 +227,6 @@ add_worker_to_cleaner(CoordinatorPid, #shard{node = Node, ref = Ref}) ->
         _ ->
             ok
     end.
-
-set_from_list(List) when is_list(List) ->
-    sets:from_list(List, [{version, 2}]).
 
 shards_to_node_refs(Workers) when is_list(Workers) ->
     Fun = fun(#shard{node = Node, ref = Ref}) -> {Node, Ref} end,
@@ -272,7 +269,7 @@ should_clean_workers(_) ->
         end
     end),
     Cleaner = spawn_worker_cleaner(Coord, Workers, undefined),
-    Ref = erlang:monitor(process, Cleaner),
+    Ref = monitor(process, Cleaner),
     Coord ! die,
     receive
         {'DOWN', Ref, _, Cleaner, _} -> ok
@@ -292,7 +289,7 @@ does_not_fire_if_cleanup_called(_) ->
         end
     end),
     Cleaner = spawn_worker_cleaner(Coord, Workers, undefined),
-    Ref = erlang:monitor(process, Cleaner),
+    Ref = monitor(process, Cleaner),
     cleanup(Workers),
     Coord ! die,
     receive
@@ -315,7 +312,7 @@ should_clean_additional_worker_too(_) ->
     end),
     Cleaner = spawn_worker_cleaner(Coord, Workers, undefined),
     add_worker_to_cleaner(Coord, #shard{node = 'n2', ref = make_ref()}),
-    Ref = erlang:monitor(process, Cleaner),
+    Ref = monitor(process, Cleaner),
     Coord ! die,
     receive
         {'DOWN', Ref, _, Cleaner, _} -> ok
@@ -340,7 +337,7 @@ coordinator_is_killed_if_client_disconnects(_) ->
     % Close the socket and then expect coordinator to be killed
     ok = gen_tcp:close(Sock),
     Cleaner = spawn_worker_cleaner(Coord, Workers, ClientReq),
-    CleanerRef = erlang:monitor(process, Cleaner),
+    CleanerRef = monitor(process, Cleaner),
     % Assert the correct behavior on the support platforms (all except Windows so far)
     case os:type() of
         {unix, Type} when
@@ -381,7 +378,7 @@ coordinator_is_not_killed_if_client_is_connected(_) ->
     {ok, Sock} = gen_tcp:listen(0, [{active, false}]),
     ClientReq = mochiweb_request:new(Sock, 'GET', "/foo", {1, 1}, Headers),
     Cleaner = spawn_worker_cleaner(Coord, Workers, ClientReq),
-    CleanerRef = erlang:monitor(process, Cleaner),
+    CleanerRef = monitor(process, Cleaner),
     % Coordinator should stay up
     receive
         {'DOWN', CoordRef, _, Coord, _} ->
@@ -433,7 +430,7 @@ submit_jobs_sets_up_cleaner(_) ->
     meck:wait(2, rexi, cast_ref, '_', 1000),
     % If we kill the coordinator, the cleaner should kill the workers
     meck:reset(rexi),
-    CleanupMon = erlang:monitor(process, Cleaner),
+    CleanupMon = monitor(process, Cleaner),
     exit(Coord, kill),
     receive
         {'DOWN', CoordRef, _, _, WorkerReason} ->
@@ -489,13 +486,13 @@ cleanup_called_on_error(_) ->
     ?assert(meck:called(fabric_util, cleanup, 1)).
 
 setup() ->
-    ok = meck:new(rexi_utils, [passthrough]),
-    ok = meck:new(config, [passthrough]),
-    ok = meck:new(fabric_util, [passthrough]),
+    meck:new(rexi_utils, [passthrough]),
+    meck:new(config, [passthrough]),
+    meck:new(fabric_util, [passthrough]),
     meck:expect(config, get, fun(_, _, Default) -> Default end),
-    ok = meck:expect(rexi, kill_all, fun(_) -> ok end),
+    meck:expect(rexi, kill_all, fun(_) -> ok end),
     % Speed up disconnect socket timeout for the test to 200 msec
-    ok = meck:expect(chttpd_util, mochiweb_client_req_check_msec, 0, 200).
+    meck:expect(chttpd_util, mochiweb_client_req_check_msec, 0, 200).
 
 teardown(_) ->
     meck:unload().

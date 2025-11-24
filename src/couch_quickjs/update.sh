@@ -7,9 +7,6 @@ set -e
 # This is the main branch of the github mirror
 URL=https://github.com/bellard/quickjs/archive/refs/heads/master.zip
 #
-# The other alternatives:
-#   https://github.com/quickjs-ng/quickjs/commits/master/
-
 
 echo
 echo " * backup quickjs to quickjs.bak"
@@ -39,8 +36,9 @@ rm quickjs/unicode_gen_def.h
 rm quickjs/unicode_download.sh
 rm quickjs/repl.js
 rm quickjs/qjs.c
-rm quickjs/qjscalc.js
 rm quickjs/TODO
+rm quickjs/readme-cosmo.txt
+
 echo
 echo " * apply patches"
 find patches -name "*.patch" -print0 | sort -z | xargs -t -0 -n 1 patch -p0 -i
@@ -49,6 +47,9 @@ echo " * removing quickjs.bak"
 rm -rf quickjs.bak
 echo
 
-# Example how to generate patches:
+# Example how to update patches themselves:
 #
+# Run
+#  ./update_patches.sh
+# OR manually run after cloning and unzipping master.zip from quickjs:
 #  diff -u quickjs-master/quickjs.c quickjs/quickjs.c > patches/01-spidermonkey-185-mode.patch

@@ -11,7 +11,7 @@ defmodule NouveauTest do
     resp = Couch.post("/#{db_name}/_bulk_docs",
       headers: ["Content-Type": "application/json"],
       body: %{:docs => [
-                %{"_id" => "doc4", "foo" => "foo", "bar" => 42, "baz" => "hello there"},
+                %{"_id" => "doc4", "foo" => "foo", "bar" => 42, "baz" => "hello hello there"},
                 %{"_id" => "doc3", "foo" => "bar", "bar" => 12.0, "baz" => "hello"},
                 %{"_id" => "doc1", "foo" => "baz", "bar" => 0, "baz" => "there"},
                 %{"_id" => "doc2", "foo" => "foobar", "bar" => 100, "baz" => "hi"},
@@ -85,6 +85,7 @@ defmodule NouveauTest do
               index("string", "foo", doc.foo, {store: true});
               index("double", "bar", doc.bar, {store: true});
               index("stored", "baz", doc.foo);
+              if (doc.baz) {index("text", "txt", doc.baz);}
             }
           """
         }
@@ -117,6 +118,11 @@ defmodule NouveauTest do
     Enum.map(hits, fn hit -> hit["doc"]["_id"] end)
   end
 
+  def get_orders(resp) do
+    %{:body => %{"hits" => hits}} = resp
+    Enum.map(hits, fn hit -> hit["order"] end)
+  end
+
   def get_mango_ids(resp) do
     %{:body => %{"docs" => docs}} = resp
     Enum.map(docs, fn doc -> doc["_id"] end)
@@ -137,13 +143,13 @@ defmodule NouveauTest do
       "status code: #{resp.status_code}, resp body: #{:jiffy.encode(resp.body)}"
   end
 
-  test "user-agent header is forbidden", context do
+  test "user-agent header is forbidden", _context do
     resp = Couch.get("http://127.0.0.1:5987",
       headers: ["User-Agent": "couchdb"])
     assert_status_code(resp, 403)
   end
 
-  test "search analyze", context do
+  test "search analyze", _context do
     url = "/_nouveau_analyze"
     resp = Couch.post(url,
       headers: ["Content-Type": "application/json"],
@@ -185,6 +191,22 @@ defmodule NouveauTest do
     ids = get_ids(resp)
     # nouveau sorts by _id as tie-breaker
     assert ids == ["doc1", "doc2", "doc3", "doc4"]
+  end
+
+  @tag :with_db
+  test "search returns all matches for hello by relevance", context do
+    db_name = context[:db_name]
+    create_search_docs(db_name)
+    create_ddoc(db_name)
+
+    url = "/#{db_name}/_design/foo/_nouveau/bar"
+    resp = Couch.get(url, query: %{q: "txt:hello", include_docs: true})
+    assert_status_code(resp, 200)
+    ids = get_ids(resp)
+    orders = get_orders(resp)
+    # doc4 scores higher (more hello's)
+    assert ids == ["doc4", "doc3"]
+    assert Enum.at(Enum.at(orders, 0), 0)["value"] > Enum.at(Enum.at(orders, 1), 0)["value"]
   end
 
   @tag :with_db
@@ -585,7 +607,7 @@ defmodule NouveauTest do
   @tag :with_db
   test "purge with conflicts", context do
     db_name = context[:db_name]
-    create_resp = create_conflicted_search_docs(db_name)
+    _create_resp = create_conflicted_search_docs(db_name)
     create_ddoc(db_name)
 
     search_url = "/#{db_name}/_design/foo/_nouveau/bar"
@@ -621,7 +643,7 @@ defmodule NouveauTest do
 
     resp = Couch.get(search_url, query: %{q: "*:*", include_docs: true})
     assert_status_code(resp, 200)
-    hits = Enum.sort(resp.body["hits"])
+    _hits = Enum.sort(resp.body["hits"])
 
     assert get_total_hits(resp) == 2
     [hit1, hit2] = Enum.sort(resp.body["hits"])
@@ -692,6 +714,23 @@ defmodule NouveauTest do
     resp = Couch.get(url, query: %{q: "*:*", include_docs: true})
     assert_status_code(resp, 200)
     assert resp.body["update_latency"] > 0
+  end
+
+  @tag :with_db
+  test "stale search", context do
+    db_name = context[:db_name]
+    url = "/#{db_name}/_design/foo/_nouveau/bar"
+    create_ddoc(db_name)
+
+    resp = Couch.get(url, query: %{q: "*:*", update: false, include_docs: true})
+    assert_status_code(resp, 404)
+
+    create_search_docs(db_name)
+    resp = Couch.get(url, query: %{q: "*:*", include_docs: true})
+    assert_status_code(resp, 200)
+    ids = get_ids(resp)
+    # nouveau sorts by _id as tie-breaker
+    assert ids == ["doc1", "doc2", "doc3", "doc4"]
   end
 
   def seq(str) do

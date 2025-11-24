@@ -33,6 +33,8 @@
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -103,6 +105,7 @@
     :>json number updated_on: Unix timestamp of last operation update
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -197,6 +200,8 @@
     :query json endkey: Stop returning databases when the specified key is
       reached.
     :query json end_key: Alias for ``endkey`` param
+    :query boolean inclusive_end: Specifies whether the specified end key
+      should be included in the result. Default is ``true``.
     :query number limit: Limit the number of the returned databases to the
       specified number.
     :query number skip: Skip this number of databases before starting to return
@@ -206,6 +211,8 @@
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -264,6 +271,8 @@
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -324,6 +333,8 @@
     :<json array keys: Array of database names to be requested
     :code 200: Request completed successfully
     :code 400: Missing keys or exceeded keys in request
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -431,6 +442,8 @@
     :>json string state: Current ``state`` of the node and/or cluster (see
         below)
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     The ``state`` returned indicates the current node or cluster state, and
     is one of the following:
@@ -525,8 +538,11 @@
     :<json array ensure_dbs_exist: List of system databases to ensure exist
         on the node/cluster. Defaults to
         ``["_users","_replicator"]``.
+    :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
-    *No example request/response included here. For a worked example, please
+    *No example request/response included here. For a working example, please
     see* :ref:`cluster/setup/api`.
 
 .. _api/server/db_updates:
@@ -574,6 +590,7 @@
     :>json string last_seq: The last sequence ID reported.
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     The ``results`` field of database updates:
 
@@ -633,6 +650,8 @@
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -699,11 +718,11 @@
       :ref:`selector objects <selectorobj>` in replication documents.
       ``doc_ids``, ``filter``, and ``selector`` are mutually exclusive.
     :<json string source_proxy: Address of a proxy server through which
-      replication from the source should occur (protocol can be "http" or
-      "socks5")
+      replication from the source should occur (protocol can be "http", "https",
+      or "socks5")
     :<json string target_proxy: Address of a proxy server through which
-      replication to the target should occur (protocol can be "http" or
-      "socks5")
+      replication to the target should occur (protocol can be "http", "https",
+      or "socks5")
     :<json string/object source: Fully qualified source database URL or an
       object which contains the full URL of the source database with additional
       parameters like headers. Eg: 'http://example.com/source_db_name' or
@@ -732,6 +751,7 @@
     :code 202: Continuous replication request has been accepted
     :code 400: Invalid JSON data
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: Either the source or target DB is not found or attempt to
       cancel unknown replication task
     :code 500: JSON specification was invalid
@@ -1065,6 +1085,7 @@ error.
     :>json string start_time: Timestamp of when the replication was started
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -1219,6 +1240,7 @@ error.
                                replication is not making progress.
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     The ``info`` field of a scheduler doc:
 
@@ -1364,6 +1386,7 @@ error.
                                replication is not making progress.
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     The ``info`` field of a scheduler doc:
 
@@ -1472,6 +1495,7 @@ error.
                                replication is not making progress.
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     The ``info`` field of a scheduler doc:
 
@@ -1559,6 +1583,8 @@ error.
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -1613,6 +1639,8 @@ error.
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -1732,6 +1760,10 @@ containing only the requested individual statistic.
     :ref:`api/server/stats`, and :ref:`api/server/system` endpoints. The format is
     determined by `Prometheus <https://prometheus.io/docs/introduction/overview/>`_.
     The format version is 2.0.
+
+    :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -1935,6 +1967,7 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
 
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2043,6 +2076,8 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2083,6 +2118,8 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
     it is not meant to be used in production
 
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
 .. _api/server/versions:
 
@@ -2094,7 +2131,10 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
     :synopsis: Returns system-level server version informations
 
     The ``_versions`` resource returns a JSON object containing various
-    system-level informations for the running server.
+    system-level information for the running server.
+
+    Optionally, if a ``clouseau`` search node is detected, its version
+    will also be displayed.
 
     The literal string ``_local`` serves as an alias for the local node name, so
     for all stats URLs, ``{node-name}`` may be replaced with ``_local``, to
@@ -2104,6 +2144,8 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
                      - :mimetype:`text/plain`
     :>header Content-Type: - :mimetype:`application/json`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2137,6 +2179,9 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
                     "sha256",
                 ]
             },
+            "clouseau": {
+                "version": "2.24.0"
+            },
             "collation_driver": {
                 "name": "libicu",
                 "library_version": "70.1",
@@ -2166,6 +2211,8 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
     :param text:  Analyzer token you want to test
     :code 200: Request completed successfully
     :code 400: Request body is wrong (malformed or missing one of the mandatory fields)
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 500: A server error (or other kind of error) occurred
 
 **Request**:
@@ -2213,6 +2260,8 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
     :param text:  Analyzer token you want to test
     :code 200: Request completed successfully
     :code 400: Request body is wrong (malformed or missing one of the mandatory fields)
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 500: A server error (or other kind of error) occurred
 
 **Request**:
@@ -2255,6 +2304,8 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
     :>header Content-Type: :mimetype:`text/html`
     :>header Last-Modified: Static files modification timestamp
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
 .. _api/server/up:
 
@@ -2269,10 +2320,20 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
 
     Confirms that the server is up, running, and ready to respond to requests.
     If :config:option:`maintenance_mode <couchdb/maintenance_mode>` is
-    ``true`` or ``nolb``, the endpoint will return a 404 response.
+    ``true`` or ``nolb``, the endpoint will return a 404 response. The status field
+    in the response body also changes to reflect the current ``maintenance_mode``
+    defaulting to ``ok``.
+
+    If :config:option:`maintenance_mode <couchdb/maintenance_mode>` is ``true`` the status
+    field is set to ``maintenance_mode``.
+
+    If :config:option:`maintenance_mode <couchdb/maintenance_mode>` is set to ``nolb`` the
+    status field is set to ``nolb``.
 
     :>header Content-Type: :mimetype:`application/json`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: The server is unavailable for requests at this time.
 
     **Response**:
@@ -2313,6 +2374,8 @@ See :ref:`Configuration of Prometheus Endpoint <config/prometheus>` for details.
     :code 200: Request completed successfully
     :code 400: Requested more UUIDs than is :config:option:`allowed
                <uuids/max_count>` to retrieve
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2392,6 +2455,8 @@ You can verify the change by obtaining a list of UUIDs:
 
     :>header Content-Type: :mimetype:`image/x-icon`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: The requested content could not be found
 
 .. _api/server/reshard:
@@ -2422,6 +2487,7 @@ You can verify the change by obtaining a list of UUIDs:
 
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2462,6 +2528,7 @@ You can verify the change by obtaining a list of UUIDs:
 
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2504,6 +2571,7 @@ You can verify the change by obtaining a list of UUIDs:
     :code 200: Request completed successfully
     :code 400: Invalid request. Could be a bad or missing state name.
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2548,6 +2616,7 @@ You can verify the change by obtaining a list of UUIDs:
 
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2628,6 +2697,7 @@ You can verify the change by obtaining a list of UUIDs:
 
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -2716,6 +2786,7 @@ You can verify the change by obtaining a list of UUIDs:
     :code 201: One or more jobs were successfully created
     :code 400: Invalid request. Parameter validation might have failed.
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: Db, node, range or shard was not found
 
     **Request**:
@@ -2763,6 +2834,7 @@ You can verify the change by obtaining a list of UUIDs:
 
     :code 200: The job was removed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: The job was not found
 
     **Request**:
@@ -2798,6 +2870,7 @@ You can verify the change by obtaining a list of UUIDs:
 
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: The job was not found
 
     **Request**:
@@ -2842,6 +2915,7 @@ You can verify the change by obtaining a list of UUIDs:
     :code 200: Request completed successfully
     :code 400: Invalid request. Could be a bad state name, for example.
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: The job was not found
 
     **Request**:

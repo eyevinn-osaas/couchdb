@@ -66,10 +66,10 @@ init([]) ->
     State = #state{
         update_db = UpdateDb,
         pending_update_count = 0,
-        pending_updates = sets:new([{version, 2}]),
+        pending_updates = couch_util:new_set(),
         max_write_delay = MaxWriteDelay,
         dbname = GlobalChangesDbName,
-        handler_ref = erlang:monitor(process, Handler)
+        handler_ref = monitor(process, Handler)
     },
     {ok, State}.
 
@@ -79,7 +79,7 @@ handle_call(_Msg, _From, State) ->
 handle_cast(_Msg, #state{update_db = false} = State) ->
     {noreply, State};
 handle_cast({update_docs, DocIds}, State) ->
-    Pending = sets:union(sets:from_list(DocIds), State#state.pending_updates),
+    Pending = sets:union(couch_util:set_from_list(DocIds), State#state.pending_updates),
     PendingCount = sets:size(Pending),
     couch_stats:update_gauge(
         [global_changes, server_pending_updates],
@@ -100,7 +100,7 @@ handle_cast({set_update_db, Boolean}, State0) ->
             {false, true} ->
                 State0#state{
                     update_db = Boolean,
-                    pending_updates = sets:new([{version, 2}]),
+                    pending_updates = couch_util:new_set(),
                     pending_update_count = 0
                 };
             _ ->
@@ -122,7 +122,7 @@ handle_info(flush_updates, State) ->
 handle_info(start_listener, State) ->
     {ok, Handler} = global_changes_listener:start(),
     NewState = State#state{
-        handler_ref = erlang:monitor(process, Handler)
+        handler_ref = monitor(process, Handler)
     },
     {noreply, NewState};
 handle_info({'DOWN', Ref, _, _, Reason}, #state{handler_ref = Ref} = State) ->
@@ -168,7 +168,7 @@ flush_updates(State) ->
         0
     ),
     {noreply, State#state{
-        pending_updates = sets:new([{version, 2}]),
+        pending_updates = couch_util:new_set(),
         pending_update_count = 0
     }}.
 

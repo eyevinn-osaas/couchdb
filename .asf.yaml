@@ -1,7 +1,7 @@
 # see https://cwiki.apache.org/confluence/display/INFRA/git+-+.asf.yaml+features#git.asf.yamlfeatures-GitHubsettings
 
 github:
-  description: "Seamless multi-master syncing database with an intuitive HTTP/JSON API, designed for reliability"
+  description: "Seamless multi-primary syncing database with an intuitive HTTP/JSON API, designed for reliability"
   homepage: https://couchdb.apache.org/
   labels:
     - database
@@ -17,10 +17,12 @@ github:
   features:
     issues: true
     projects: true
+    discussions: true
   enabled_merge_buttons:
     squash: true
     rebase: true
     merge: true
+  del_branch_on_merge: true
   protected_branches:
     main:
       required_status_checks:
@@ -38,6 +40,9 @@ github:
         strict: true
         contexts:
           - continuous-integration/jenkins/pr-merge
+    3.5.x:
+      required_status_checks:
+        strict: true
     3.4.x:
       required_status_checks:
         strict: true
@@ -82,6 +87,7 @@ notifications:
   commits: commits@couchdb.apache.org
   issues: notifications@couchdb.apache.org
   pullrequests: notifications@couchdb.apache.org
+  discussions: notifications@couchdb.apache.org
   # This would send new/closed PR notifications to dev@
   #pullrequests_status: dev@couchdb.apache.org
   # This would send individual PR comments/reviews to notifications@

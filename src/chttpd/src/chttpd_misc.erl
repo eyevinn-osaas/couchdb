@@ -101,7 +101,7 @@ handle_utils_dir_req(#httpd{method = 'GET'} = Req, DocumentRoot) ->
             CachingHeaders = [{"Cache-Control", "private, must-revalidate"}],
             DefaultValues =
                 "child-src 'self' data: blob:; default-src 'self'; img-src 'self' data:; font-src 'self'; "
-                "script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline';",
+                "script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; frame-src https://blog.couchdb.org;",
             Headers = chttpd_util:maybe_add_csp_header("utils", CachingHeaders, DefaultValues),
             chttpd:serve_file(Req, RelativePath, DocumentRoot, Headers);
         {_ActionKey, "", _RelativePath} ->
@@ -252,7 +252,7 @@ replicate({Props} = PostBody, Ctx) ->
             ]),
             case rpc:call(Node, couch_replicator, replicate, [PostBody, Ctx]) of
                 {badrpc, Reason} ->
-                    erlang:error(Reason);
+                    error(Reason);
                 Res ->
                     Res
             end
@@ -281,7 +281,7 @@ cancel_replication(PostBody, Ctx) ->
 
 choose_node(Key) when is_binary(Key) ->
     Checksum = erlang:crc32(Key),
-    Nodes = lists:sort([node() | erlang:nodes()]),
+    Nodes = lists:sort([node() | nodes()]),
     lists:nth(1 + Checksum rem length(Nodes), Nodes);
 choose_node(Key) ->
     choose_node(?term_to_bin(Key)).

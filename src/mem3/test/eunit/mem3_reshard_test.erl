@@ -22,17 +22,7 @@
 -define(TIMEOUT, 60).
 
 setup() ->
-    HaveDreyfus = code:lib_dir(dreyfus) /= {error, bad_name},
-    case HaveDreyfus of
-        false -> ok;
-        true -> mock_dreyfus_indices()
-    end,
-
-    HaveHastings = code:lib_dir(hastings) /= {error, bad_name},
-    case HaveHastings of
-        false -> ok;
-        true -> mock_hastings_indices()
-    end,
+    mock_dreyfus_indices(),
     {Db1, Db2} = {?tempdb(), ?tempdb()},
     create_db(Db1, [{q, 1}, {n, 1}]),
     PartProps = [{partitioned, true}, {hash, [couch_partition, hash, []]}],
@@ -103,6 +93,14 @@ split_one_shard(#{db1 := Db}) ->
             SecObj = {[{<<"foo">>, <<"bar">>}]},
             set_security(Db, SecObj),
 
+            {ok, TSeqs} = get_time_seq(Db),
+            Node = config:node_name(),
+            #{
+                [16#00000000, 16#ffffffff] := #{
+                    Node := #{bins := [{Time1, TSeq1} | _]}
+                }
+            } = TSeqs,
+
             % DbInfo is saved after setting metadata bits
             % as those could bump the update sequence
             DbInfo0 = get_db_info(Db),
@@ -153,7 +151,23 @@ split_one_shard(#{db1 := Db}) ->
 
             % Don't forget about the local but don't include internal checkpoints
             % as some of those are munged and transformed during the split
-            ?assertEqual(without_meta_locals(Local0), without_meta_locals(Local1))
+            ?assertEqual(without_meta_locals(Local0), without_meta_locals(Local1)),
+
+            % Verify the time seq structure. There should be one per range. With the
+            % same time and sequence as the source
+            {ok, TSeqs1} = get_time_seq(Db),
+            #{
+                [16#00000000, 16#7fffffff] := #{
+                    Node := #{bins := [{Time2, TSeq2} | _]}
+                },
+                [16#80000000, 16#ffffffff] := #{
+                    Node := #{bins := [{Time3, TSeq3} | _]}
+                }
+            } = TSeqs1,
+            ?assertEqual(TSeq1, TSeq2),
+            ?assertEqual(TSeq1, TSeq3),
+            ?assertEqual(Time1, Time2),
+            ?assertEqual(Time1, Time3)
         end)}.
 
 % Test to check that shard with high number of purges can be split
@@ -276,42 +290,24 @@ update_docs_before_topoff1(#{db1 := Db}) ->
 indices_are_built(#{db1 := Db}) ->
     {timeout, ?TIMEOUT,
         ?_test(begin
-            HaveDreyfus = code:lib_dir(dreyfus) /= {error, bad_name},
-            HaveHastings = code:lib_dir(hastings) /= {error, bad_name},
-
-            add_test_docs(Db, #{docs => 10, mrview => 2, search => 2, geo => 2}),
+            add_test_docs(Db, #{docs => 10, mrview => 2, search => 2}),
             [#shard{name = Shard}] = lists:sort(mem3:local_shards(Db)),
             {ok, JobId} = mem3_reshard:start_split_job(Shard),
             wait_state(JobId, completed),
             Shards1 = lists:sort(mem3:local_shards(Db)),
             ?assertEqual(2, length(Shards1)),
             MRViewGroupInfo = get_group_info(Db, <<"_design/mrview00000">>),
-            ?assertMatch(#{<<"update_seq">> := 32}, MRViewGroupInfo),
+            ?assertMatch(#{<<"update_seq">> := 28}, MRViewGroupInfo),
 
-            HaveDreyfus = code:lib_dir(dreyfus) /= {error, bad_name},
-            case HaveDreyfus of
-                false ->
-                    ok;
-                true ->
-                    % 4 because there are 2 indices and 2 target shards
-                    ?assertEqual(4, meck:num_calls(dreyfus_index, await, 2))
-            end,
-
-            HaveHastings = code:lib_dir(hastings) /= {error, bad_name},
-            case HaveHastings of
-                false ->
-                    ok;
-                true ->
-                    % 4 because there are 2 indices and 2 target shards
-                    ?assertEqual(4, meck:num_calls(hastings_index, await, 2))
-            end
+            % 4 because there are 2 indices and 2 target shards
+            ?assertEqual(4, meck:num_calls(dreyfus_index, await, 2))
         end)}.
 
 % This test that indices are built despite intermittent errors.
 indices_can_be_built_with_errors(#{db1 := Db}) ->
     {timeout, ?TIMEOUT,
         ?_test(begin
-            add_test_docs(Db, #{docs => 10, mrview => 2, search => 2, geo => 2}),
+            add_test_docs(Db, #{docs => 10, mrview => 2, search => 2}),
             [#shard{name = Shard}] = lists:sort(mem3:local_shards(Db)),
             meck:expect(
                 couch_index_server,
@@ -343,11 +339,11 @@ indices_can_be_built_with_errors(#{db1 := Db}) ->
             Shards1 = lists:sort(mem3:local_shards(Db)),
             ?assertEqual(2, length(Shards1)),
             MRViewGroupInfo = get_group_info(Db, <<"_design/mrview00000">>),
-            ?assertMatch(#{<<"update_seq">> := 32}, MRViewGroupInfo)
+            ?assertMatch(#{<<"update_seq">> := 28}, MRViewGroupInfo)
         end)}.
 
 mock_dreyfus_indices() ->
-    meck:expect(dreyfus_index, design_doc_to_indexes, fun(Doc) ->
+    meck:expect(dreyfus_index, design_doc_to_indexes, fun(_, Doc) ->
         #doc{body = {BodyProps}} = Doc,
         case couch_util:get_value(<<"indexes">>, BodyProps) of
             undefined ->
@@ -358,19 +354,6 @@ mock_dreyfus_indices() ->
     end),
     meck:expect(dreyfus_index_manager, get_index, fun(_, _) -> {ok, pid} end),
     meck:expect(dreyfus_index, await, fun(_, _) -> {ok, indexpid, someseq} end).
-
-mock_hastings_indices() ->
-    meck:expect(hastings_index, design_doc_to_indexes, fun(Doc) ->
-        #doc{body = {BodyProps}} = Doc,
-        case couch_util:get_value(<<"st_indexes">>, BodyProps) of
-            undefined ->
-                [];
-            {[_]} ->
-                [{hastings, <<"db">>, hastings_index1}]
-        end
-    end),
-    meck:expect(hastings_index_manager, get_index, fun(_, _) -> {ok, pid} end),
-    meck:expect(hastings_index, await, fun(_, _) -> {ok, someseq} end).
 
 % Split partitioned database
 split_partitioned_db(#{db2 := Db}) ->
@@ -781,6 +764,9 @@ set_security(DbName, SecObj) ->
 get_security(DbName) ->
     with_proc(fun() -> fabric:get_security(DbName, [?ADMIN_CTX]) end).
 
+get_time_seq(DbName) ->
+    with_proc(fun() -> fabric:get_time_seq(DbName, [?ADMIN_CTX]) end).
+
 get_db_info(DbName) ->
     with_proc(fun() ->
         {ok, Info} = fabric:get_db_info(DbName),
@@ -824,7 +810,7 @@ get_all_docs(DbName) ->
     get_all_docs(DbName, #mrargs{}).
 
 get_all_docs(DbName, #mrargs{} = QArgs0) ->
-    GL = erlang:group_leader(),
+    GL = group_leader(),
     with_proc(
         fun() ->
             Cb = fun
@@ -886,11 +872,11 @@ to_map({[_ | _]} = EJson) ->
     jiffy:decode(jiffy:encode(EJson), [return_maps]).
 
 create_db(DbName, Opts) ->
-    GL = erlang:group_leader(),
+    GL = group_leader(),
     with_proc(fun() -> fabric:create_db(DbName, Opts) end, GL).
 
 delete_db(DbName) ->
-    GL = erlang:group_leader(),
+    GL = group_leader(),
     with_proc(fun() -> fabric:delete_db(DbName, [?ADMIN_CTX]) end, GL).
 
 with_proc(Fun) ->
@@ -903,7 +889,7 @@ with_proc(Fun, GroupLeader, Timeout) ->
     {Pid, Ref} = spawn_monitor(fun() ->
         case GroupLeader of
             undefined -> ok;
-            _ -> erlang:group_leader(GroupLeader, self())
+            _ -> group_leader(GroupLeader, self())
         end,
         exit({with_proc_res, Fun()})
     end),
@@ -913,7 +899,7 @@ with_proc(Fun, GroupLeader, Timeout) ->
         {'DOWN', Ref, process, Pid, Error} ->
             error(Error)
     after Timeout ->
-        erlang:demonitor(Ref, [flush]),
+        demonitor(Ref, [flush]),
         exit(Pid, kill),
         error({with_proc_timeout, Fun, Timeout})
     end.
@@ -924,7 +910,6 @@ add_test_docs(DbName, #{} = DocSpec) ->
             pdocs(maps:get(pdocs, DocSpec, #{})) ++
             ddocs(mrview, maps:get(mrview, DocSpec, [])) ++
             ddocs(search, maps:get(search, DocSpec, [])) ++
-            ddocs(geo, maps:get(geo, DocSpec, [])) ++
             ldocs(maps:get(local, DocSpec, [])),
     Res = update_docs(DbName, Docs),
     Docs1 = lists:map(
@@ -1018,17 +1003,6 @@ ddprop(mrview) ->
                 {<<"v1">>,
                     {[
                         {<<"map">>, <<"function(d){emit(d);}">>}
-                    ]}}
-            ]}}
-    ];
-ddprop(geo) ->
-    [
-        {<<"st_indexes">>,
-            {[
-                {<<"area">>,
-                    {[
-                        {<<"analyzer">>, <<"standard">>},
-                        {<<"index">>, <<"function(d){if(d.g){st_index(d.g)}}">>}
                     ]}}
             ]}}
     ];

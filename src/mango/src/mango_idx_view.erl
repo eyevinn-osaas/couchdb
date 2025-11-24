@@ -554,7 +554,7 @@ covers(Idx, Fields) ->
             false;
         _ ->
             Available = [<<"_id">> | columns(Idx)],
-            sets:is_subset(sets:from_list(Fields), sets:from_list(Available))
+            sets:is_subset(couch_util:set_from_list(Fields), couch_util:set_from_list(Available))
     end.
 
 -ifdef(TEST).

@@ -22,7 +22,8 @@
     compile_regexes/1,
     match_regexes/2,
     on_first_node/0,
-    consistent_hash_nodes/1
+    consistent_hash_nodes/1,
+    parse_non_weekday_period/1
 ]).
 
 -define(SECOND, 1).
@@ -31,6 +32,7 @@
 -define(DAY, 24 * ?HOUR).
 -define(WEEK, 7 * ?DAY).
 -define(MONTH, 30 * ?DAY).
+-define(YEAR, 365 * ?DAY).
 
 new_scan_id() ->
     TSec = integer_to_binary(erlang:system_time(second)),
@@ -240,15 +242,17 @@ parse_non_weekday_period(Period) ->
             undefined
     end.
 
-parse_period_unit(Period) when is_list(Period) ->
-    case Period of
-        "sec" ++ _ -> ?SECOND;
-        "min" ++ _ -> ?MINUTE;
-        "hour" ++ _ -> ?HOUR;
-        "day" ++ _ -> ?DAY;
-        "week" ++ _ -> ?WEEK;
-        "month" ++ _ -> ?MONTH;
-        _ -> undefined
+%% erlfmt-ignore
+parse_period_unit(P) when is_list(P) ->
+    if
+        P == "s";   P == "sec";    P == "second";  P == "seconds" -> ?SECOND;
+        P == "min"; P == "minute"; P == "minutes"                 -> ?MINUTE;
+        P == "h";   P == "hrs";    P == "hour";    P == "hours"   -> ?HOUR;
+        P == "d";   P == "day";    P == "days"                    -> ?DAY;
+        P == "w";   P == "week";   P == "weeks"                   -> ?WEEK;
+        P == "mon"; P == "month";  P == "months"                  -> ?MONTH;
+        P == "y";   P == "year";   P == "years"                   -> ?YEAR;
+        true                                                      -> undefined
     end.
 
 % Logging bits
@@ -259,7 +263,8 @@ log_format_meta(Mod, #{} = Meta) ->
     Db = {"db:~s ", format_db(maps:get(db, Meta, undefined))},
     DDocId = {"ddoc:~s ", maps:get(ddoc, Meta, undefined)},
     DocId = {"doc:~s ", maps:get(doc, Meta, undefined)},
-    FmtArgs = [{"~s ", Mod}, SId, Fun, Db, DDocId, DocId],
+    Index = {"index:~s ", maps:get(index, Meta, undefined)},
+    FmtArgs = [{"~s ", Mod}, SId, Fun, Db, DDocId, Index, DocId],
     lists:unzip([{Fmt, Arg} || {Fmt, Arg} <- FmtArgs, Arg /= undefined]).
 
 format_db(undefined) ->
@@ -268,9 +273,9 @@ format_db(Db) when is_list(Db) ->
     format_db(list_to_binary(Db));
 format_db(Db) when is_tuple(Db) ->
     format_db(couch_db:name(Db));
-format_db(<<"shards/", B:8/binary, "-", E:8/binary, "/", Rest/binary>>) ->
+format_db(<<"shards/", _:8/binary, "-", _:8/binary, "/", Rest/binary>>) ->
     [Db, _] = binary:split(Rest, <<".">>),
-    <<Db/binary, "/", B/binary, "-", E/binary>>;
+    Db;
 format_db(<<Db/binary>>) ->
     Db.
 
@@ -296,6 +301,9 @@ parse_after_test() ->
 parse_repeat_test() ->
     ?assertEqual(undefined, parse_repeat("foo")),
     ?assertEqual(undefined, parse_repeat("ReStarT")),
+    ?assertEqual(undefined, parse_repeat("1_ms")),
+    ?assertEqual(undefined, parse_repeat("1_x")),
+    ?assertEqual(undefined, parse_repeat("1_m")),
     ?assertEqual({weekday, 1}, parse_repeat("mon")),
     ?assertEqual({weekday, 1}, parse_repeat("Monday")),
     ?assertEqual({weekday, 2}, parse_repeat("tuesday")),
@@ -305,16 +313,25 @@ parse_repeat_test() ->
     ?assertEqual({weekday, 6}, parse_repeat("sAt")),
     ?assertEqual({weekday, 7}, parse_repeat("sundays")),
     ?assertEqual(1, parse_repeat("1_sec")),
+    ?assertEqual(1, parse_repeat("1_s")),
     ?assertEqual(1, parse_repeat("1_second")),
     ?assertEqual(1, parse_repeat("1_sec")),
     ?assertEqual(2, parse_repeat("2_sec")),
     ?assertEqual(3, parse_repeat("3_seconds")),
     ?assertEqual(60, parse_repeat("1_min")),
+    ?assertEqual(60, parse_repeat("1_minute")),
     ?assertEqual(2 * 60, parse_repeat("2_minutes")),
     ?assertEqual(60 * 60, parse_repeat("1_hour")),
+    ?assertEqual(3 * 60 * 60, parse_repeat("3_hours")),
+    ?assertEqual(2 * 60 * 60, parse_repeat("2_h")),
     ?assertEqual(24 * 60 * 60, parse_repeat("1_day")),
     ?assertEqual(7 * 24 * 60 * 60, parse_repeat("1_week")),
-    ?assertEqual(30 * 24 * 60 * 60, parse_repeat("1_month")).
+    ?assertEqual(2 * 7 * 24 * 60 * 60, parse_repeat("2_weeks")),
+    ?assertEqual(30 * 24 * 60 * 60, parse_repeat("1_month")),
+    ?assertEqual(30 * 24 * 60 * 60, parse_repeat("1_mon")),
+    ?assertEqual(2 * 30 * 24 * 60 * 60, parse_repeat("2_months")),
+    ?assertEqual(365 * 24 * 60 * 60, parse_repeat("1_year")),
+    ?assertEqual(2 * 365 * 24 * 60 * 60, parse_repeat("2_year")).
 
 repeat_period_test() ->
     %Fri, May 31, 2024 16:08:37
@@ -353,7 +370,7 @@ log_format_test() ->
     ?assertEqual("mod db:x ", tlog(#{db => <<"x">>})),
     ?assertEqual("mod s:y f:z db:x ", tlog(#{db => "x", sid => y, fn => z})),
     Shard = <<"shards/80000000-ffffffff/db.1712291766">>,
-    ?assertEqual("mod db:db/80000000-ffffffff ", tlog(#{db => Shard})).
+    ?assertEqual("mod db:db ", tlog(#{db => Shard})).
 
 tlog(Meta) ->
     {Fmt, Args} = log_format_meta(mod, Meta),

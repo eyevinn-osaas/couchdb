@@ -25,6 +25,8 @@
     get_db_info/1,
     get_doc_count/1, get_doc_count/2,
     set_revs_limit/3,
+    update_props/3,
+    update_props/4,
     set_security/2, set_security/3,
     get_revs_limit/1,
     get_security/1, get_security/2,
@@ -33,7 +35,9 @@
     set_purge_infos_limit/3,
     get_purged_infos/1,
     compact/1, compact/2,
-    get_partition_info/2
+    get_partition_info/2,
+    get_auto_purge_props/1,
+    set_auto_purge_props/2
 ]).
 
 % Documents
@@ -62,11 +66,23 @@
 -export([
     design_docs/1,
     reset_validation_funs/1,
-    cleanup_index_files/0,
-    cleanup_index_files/1,
+    cleanup_index_files_all_nodes/0,
     cleanup_index_files_all_nodes/1,
+    cleanup_index_files_this_node/0,
+    cleanup_index_files_this_node/1,
     dbname/1,
     db_uuids/1
+]).
+
+% time_seq stuff
+-export([
+    time_seq_since/2,
+    time_seq_histogram/1,
+    time_seq_histogram/2,
+    get_time_seq/1,
+    get_time_seq/2,
+    set_time_seq/2,
+    set_time_seq/3
 ]).
 
 -type dbname() :: (iodata() | tuple()).
@@ -118,6 +134,12 @@ get_db_info(DbName) ->
     ]}.
 get_partition_info(DbName, Partition) ->
     fabric_db_partition_info:go(dbname(DbName), Partition).
+
+get_auto_purge_props(DbName) ->
+    fabric_auto_purge:get(dbname(DbName)).
+
+set_auto_purge_props(DbName, AutoPurgeProps) ->
+    fabric_auto_purge:set(dbname(DbName), AutoPurgeProps).
 
 %% @doc the number of docs in a database
 %% @equiv get_doc_count(DbName, <<"_all_docs">>)
@@ -175,6 +197,16 @@ get_revs_limit(DbName) ->
         catch couch_db:close(Db)
     end.
 
+%% @doc update shard property. Some properties like `partitioned` or `hash` are
+%% static and cannot be updated. They will return an error.
+-spec update_props(dbname(), atom() | binary(), any()) -> ok.
+update_props(DbName, K, V) ->
+    update_props(DbName, K, V, [?ADMIN_CTX]).
+
+-spec update_props(dbname(), atom() | binary(), any(), [option()]) -> ok.
+update_props(DbName, K, V, Options) when is_atom(K) orelse is_binary(K) ->
+    fabric_db_meta:update_props(dbname(DbName), K, V, opts(Options)).
+
 %% @doc sets the readers/writers/admin permissions for a database
 -spec set_security(dbname(), SecObj :: json_obj()) -> ok.
 set_security(DbName, SecObj) ->
@@ -184,6 +216,39 @@ set_security(DbName, SecObj) ->
 -spec set_security(dbname(), SecObj :: json_obj(), [option()]) -> ok.
 set_security(DbName, SecObj, Options) ->
     fabric_db_meta:set_security(dbname(DbName), SecObj, opts(Options)).
+
+%% @doc get the time seq histograms
+-spec time_seq_histogram(dbname()) ->
+    {ok, #{#shard{} => [[binary() | non_neg_integer()]]}} | {error, any()} | no_return().
+time_seq_histogram(DbName) ->
+    time_seq_histogram(DbName, [?ADMIN_CTX]).
+
+%% @doc get the time seq histograms
+-spec time_seq_histogram(dbname(), [option()]) ->
+    {ok, #{#shard{} => [[binary() | non_neg_integer()]]}} | {error, any()} | no_return().
+time_seq_histogram(DbName, Options) ->
+    fabric_time_seq:histogram(dbname(DbName), opts(Options)).
+
+%% @doc reset the time seq data structure
+-spec set_time_seq(dbname(), couch_time_seq:time_seq()) -> ok | {error, any()}.
+set_time_seq(DbName, TSeq) ->
+    set_time_seq(DbName, TSeq, [?ADMIN_CTX]).
+
+-spec set_time_seq(dbname(), couch_time_seq:time_seq(), [option()]) -> ok | {error, any()}.
+set_time_seq(DbName, TSeq, Options) ->
+    fabric_time_seq:set_time_seq(dbname(DbName), TSeq, opts(Options)).
+
+%% @doc get the time seq data structure summary
+-spec get_time_seq(dbname()) ->
+    {ok, #{#shard{} => couch_time_seq:time_seq()}} | {error, any()} | no_return().
+get_time_seq(DbName) ->
+    get_time_seq(DbName, [?ADMIN_CTX]).
+
+%% @doc get the time seq data structure summary
+-spec get_time_seq(dbname(), [option()]) ->
+    {ok, #{#shard{} => couch_time_seq:time_seq()}} | {error, any()} | no_return().
+get_time_seq(DbName, Options) ->
+    fabric_time_seq:get_time_seq(dbname(DbName), opts(Options)).
 
 %% @doc sets the upper bound for the number of stored purge requests
 -spec set_purge_infos_limit(dbname(), pos_integer(), [option()]) -> ok.
@@ -411,9 +476,10 @@ all_docs(DbName, Callback, Acc, QueryArgs) ->
 ) ->
     {ok, any()} | {error, Reason :: term()}.
 
-all_docs(DbName, Options, Callback, Acc0, #mrargs{} = QueryArgs) when
+all_docs(DbName, Options, Callback, Acc0, #mrargs{} = QueryArgs0) when
     is_function(Callback, 2)
 ->
+    QueryArgs = fabric_util:validate_all_docs_args(DbName, QueryArgs0),
     fabric_view_all_docs:go(dbname(DbName), opts(Options), QueryArgs, Callback, Acc0);
 %% @doc convenience function that takes a keylist rather than a record
 %% @equiv all_docs(DbName, Callback, Acc0, kl_to_query_args(QueryArgs))
@@ -569,54 +635,17 @@ reset_validation_funs(DbName) ->
      || #shard{node = Node, name = Name} <- mem3:shards(DbName)
     ].
 
-%% @doc clean up index files for all Dbs
--spec cleanup_index_files() -> [ok].
-cleanup_index_files() ->
-    {ok, Dbs} = fabric:all_dbs(),
-    [cleanup_index_files(Db) || Db <- Dbs].
+cleanup_index_files_this_node() ->
+    fabric_index_cleanup:cleanup_this_node().
 
-%% @doc clean up index files for a specific db
--spec cleanup_index_files(dbname()) -> ok.
-cleanup_index_files(DbName) ->
-    try
-        ShardNames = [mem3:name(S) || S <- mem3:local_shards(dbname(DbName))],
-        cleanup_local_indices_and_purge_checkpoints(ShardNames)
-    catch
-        error:database_does_not_exist ->
-            ok
-    end.
+cleanup_index_files_this_node(Db) ->
+    fabric_index_cleanup:cleanup_this_node(dbname(Db)).
 
-cleanup_local_indices_and_purge_checkpoints([]) ->
-    ok;
-cleanup_local_indices_and_purge_checkpoints([_ | _] = Dbs) ->
-    AllIndices = lists:map(fun couch_mrview_util:get_index_files/1, Dbs),
-    AllPurges = lists:map(fun couch_mrview_util:get_purge_checkpoints/1, Dbs),
-    Sigs = couch_mrview_util:get_signatures(hd(Dbs)),
-    ok = cleanup_purges(Sigs, AllPurges, Dbs),
-    ok = cleanup_indices(Sigs, AllIndices).
+cleanup_index_files_all_nodes() ->
+    fabric_index_cleanup:cleanup_all_nodes().
 
-cleanup_purges(Sigs, AllPurges, Dbs) ->
-    Fun = fun(DbPurges, Db) ->
-        couch_mrview_cleanup:cleanup_purges(Db, Sigs, DbPurges)
-    end,
-    lists:zipwith(Fun, AllPurges, Dbs),
-    ok.
-
-cleanup_indices(Sigs, AllIndices) ->
-    Fun = fun(DbIndices) ->
-        couch_mrview_cleanup:cleanup_indices(Sigs, DbIndices)
-    end,
-    lists:foreach(Fun, AllIndices).
-
-%% @doc clean up index files for a specific db on all nodes
--spec cleanup_index_files_all_nodes(dbname()) -> [reference()].
-cleanup_index_files_all_nodes(DbName) ->
-    lists:foreach(
-        fun(Node) ->
-            rexi:cast(Node, {?MODULE, cleanup_index_files, [DbName]})
-        end,
-        mem3:nodes()
-    ).
+cleanup_index_files_all_nodes(Db) ->
+    fabric_index_cleanup:cleanup_all_nodes(dbname(Db)).
 
 %% some simple type validation and transcoding
 dbname(DbName) when is_list(DbName) ->
@@ -628,13 +657,29 @@ dbname(Db) ->
         couch_db:name(Db)
     catch
         error:badarg ->
-            erlang:error({illegal_database_name, Db})
+            error({illegal_database_name, Db})
     end.
 
 %% @doc get db shard uuids
 -spec db_uuids(dbname()) -> map().
 db_uuids(DbName) ->
     fabric_db_uuids:go(dbname(DbName)).
+
+%% @doc get db update sequence before a timestamp
+-spec time_seq_since(dbname(), list() | binary() | pos_integer()) ->
+    {ok, binary()} | {error, any()}.
+time_seq_since(DbName, Time) when is_binary(Time) ->
+    time_seq_since(DbName, binary_to_list(Time));
+time_seq_since(DbName, Time) when is_list(Time) ->
+    try calendar:rfc3339_to_system_time(Time) of
+        TimeUnix ->
+            time_seq_since(DbName, TimeUnix)
+    catch
+        _:_ ->
+            {error, invalid_time_format}
+    end;
+time_seq_since(DbName, Time) when is_integer(Time), Time >= 0 ->
+    fabric_time_seq:since(dbname(DbName), Time).
 
 name(Thing) ->
     couch_util:to_binary(Thing).
@@ -647,7 +692,7 @@ docid(DocId) ->
 docs(Db, Docs) when is_list(Docs) ->
     [doc(Db, D) || D <- Docs];
 docs(_Db, Docs) ->
-    erlang:error({illegal_docs_list, Docs}).
+    error({illegal_docs_list, Docs}).
 
 doc(_Db, #doc{} = Doc) ->
     Doc;
@@ -657,14 +702,13 @@ doc(Db0, {_} = Doc) ->
             true ->
                 Db0;
             false ->
-                Shard = hd(mem3:shards(Db0)),
-                Props = couch_util:get_value(props, Shard#shard.opts, []),
+                Props = mem3:props(Db0),
                 {ok, Db1} = couch_db:clustered_db(Db0, [{props, Props}]),
                 Db1
         end,
     couch_db:doc_from_json_obj_validate(Db, Doc);
 doc(_Db, Doc) ->
-    erlang:error({illegal_doc_format, Doc}).
+    error({illegal_doc_format, Doc}).
 
 design_doc(#doc{} = DDoc) ->
     DDoc;
@@ -761,7 +805,7 @@ set_namespace(NS, #mrargs{extra = Extra} = Args) ->
     Args#mrargs{extra = [{namespace, NS} | Extra]}.
 
 -ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
+-include_lib("couch/include/couch_eunit.hrl").
 
 update_doc_test_() ->
     {
@@ -770,18 +814,12 @@ update_doc_test_() ->
             setup,
             fun setup/0,
             fun teardown/1,
-            fun(Ctx) ->
-                [
-                    should_throw_conflict(Ctx)
-                ]
-            end
+            with([?TDEF(should_throw_conflict)])
         }
     }.
 
 should_throw_conflict(Doc) ->
-    ?_test(begin
-        ?assertThrow(conflict, update_doc(<<"test-db">>, Doc, []))
-    end).
+    ?assertThrow(conflict, update_doc(<<"test-db">>, Doc, [])).
 
 setup() ->
     Doc = #doc{
@@ -793,25 +831,13 @@ setup() ->
         meta = []
     },
     ok = application:ensure_started(config),
-    ok = meck:expect(mem3, shards, fun(_, _) -> [] end),
-    ok = meck:expect(mem3, quorum, fun(_) -> 1 end),
-    ok = meck:expect(rexi, cast, fun(_, _) -> ok end),
-    ok = meck:expect(
-        rexi_utils,
-        recv,
-        fun(_, _, _, _, _, _) ->
-            {ok, {error, [{Doc, conflict}]}}
-        end
-    ),
-    ok = meck:expect(
-        couch_util,
-        reorder_results,
-        fun(_, [{_, Res}], _) ->
-            [Res]
-        end
-    ),
-    ok = meck:expect(fabric_util, create_monitors, fun(_) -> ok end),
-    ok = meck:expect(rexi_monitor, stop, fun(_) -> ok end),
+    meck:expect(mem3, shards, fun(_, _) -> [] end),
+    meck:expect(mem3, quorum, fun(_) -> 1 end),
+    meck:expect(rexi, cast, fun(_, _) -> ok end),
+    meck:expect(rexi_utils, recv, fun(_, _, _, _, _, _) -> {ok, {error, [{Doc, conflict}]}} end),
+    meck:expect(couch_util, reorder_results, fun(_, [{_, Res}], _) -> [Res] end),
+    meck:expect(fabric_util, create_monitors, fun(_) -> ok end),
+    meck:expect(rexi_monitor, stop, fun(_) -> ok end),
     Doc.
 
 teardown(_) ->

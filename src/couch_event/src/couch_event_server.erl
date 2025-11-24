@@ -33,7 +33,7 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, nil, []).
 
 init(_) ->
-    couch_util:set_mqd_off_heap(?MODULE),
+    erlang:process_flag(message_queue_data, off_heap),
     {ok, #st{
         by_pid = #{},
         by_dbname = #{}
@@ -42,7 +42,7 @@ init(_) ->
 handle_call({register, Pid, NewDbNames}, _From, St) ->
     case maps:get(Pid, St#st.by_pid, undefined) of
         undefined ->
-            NewRef = erlang:monitor(process, Pid),
+            NewRef = monitor(process, Pid),
             {reply, ok, register(St, NewRef, Pid, NewDbNames)};
         {ReuseRef, OldDbNames} ->
             unregister(St, Pid, OldDbNames),
@@ -53,7 +53,7 @@ handle_call({unregister, Pid}, _From, #st{by_pid = ByPid} = St) ->
         undefined ->
             {reply, not_registered, St};
         {Ref, OldDbNames} ->
-            erlang:demonitor(Ref, [flush]),
+            demonitor(Ref, [flush]),
             {reply, ok, unregister(St, Pid, OldDbNames)}
     end;
 handle_call(Msg, From, St) ->
@@ -229,7 +229,7 @@ t_invalid_gen_server_messages(_) ->
 
 kill_sync(Pid) ->
     unlink(Pid),
-    Ref = erlang:monitor(process, Pid),
+    Ref = monitor(process, Pid),
     exit(Pid, kill),
     receive
         {'DOWN', Ref, _, _, _} -> ok

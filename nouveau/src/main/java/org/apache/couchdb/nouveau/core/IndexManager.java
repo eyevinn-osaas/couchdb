@@ -33,7 +33,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.stream.Stream;
 import org.apache.couchdb.nouveau.api.IndexDefinition;
 import org.apache.couchdb.nouveau.lucene9.Lucene9AnalyzerFactory;
 import org.apache.couchdb.nouveau.lucene9.Lucene9Index;
@@ -119,11 +118,21 @@ public final class IndexManager implements Managed {
             // CachedData pattern from ReentrantReadWriteLock javadoc
             holder.lock.readLock().lock();
 
-            // Load if not already loaded.
-            if (holder.state == HolderState.NOT_LOADED) {
+            // Load if not already loaded or remove if Lucene closed the index elsewhere.
+            if (holder.state == HolderState.NOT_LOADED
+                    || (holder.state == HolderState.LOADED && !holder.index.isOpen())) {
                 holder.lock.readLock().unlock();
                 holder.lock.writeLock().lock();
                 try {
+                    if (holder.state == HolderState.LOADED && !holder.index.isOpen()) {
+                        LOGGER.info("removing closed index {}", name);
+                        holder.state = HolderState.UNLOADED;
+                        holder.index = null;
+                        synchronized (cache) {
+                            cache.remove(name, holder);
+                        }
+                        continue retry;
+                    }
                     if (holder.state == HolderState.NOT_LOADED) {
                         holder.index = load(name);
                         holder.commitFuture = this.schedulerExecutorService.scheduleWithFixedDelay(
@@ -188,9 +197,6 @@ public final class IndexManager implements Managed {
                     }
                     holder.state = HolderState.UNLOADED;
                     holder.index = null;
-                    synchronized (cache) {
-                        cache.remove(name, holder);
-                    }
                     break;
                 case NOT_LOADED:
                 case UNLOADED:
@@ -200,6 +206,9 @@ public final class IndexManager implements Managed {
                     break;
             }
         } finally {
+            synchronized (cache) {
+                cache.remove(name, holder);
+            }
             holder.lock.writeLock().unlock();
         }
     }
@@ -240,35 +249,49 @@ public final class IndexManager implements Managed {
     }
 
     public void deleteAll(final String path, final List<String> exclusions) throws IOException {
-        LOGGER.info("deleting indexes below {} (excluding {})", path, exclusions == null ? "nothing" : exclusions);
+        LOGGER.info(
+                "deleting indexes matching {} (excluding {})",
+                path,
+                exclusions == null || exclusions.isEmpty() ? "nothing" : exclusions);
+        var parts = path.split("/");
+        deleteAll(rootDir, parts, 0, exclusions);
+    }
 
-        final Path indexRootPath = indexRootPath(path);
-        if (!indexRootPath.toFile().exists()) {
+    private void deleteAll(final Path path, final String[] parts, final int index, final List<String> exclusions)
+            throws IOException {
+        // End of the path
+        if (index == parts.length - 1) {
+            try (var stream = Files.newDirectoryStream(path, parts[index])) {
+                stream.forEach(p -> {
+                    if (exclusions != null && exclusions.indexOf(p.getFileName().toString()) != -1) {
+                        return;
+                    }
+                    final String relativeName = rootDir.relativize(p).toString();
+                    try {
+                        deleteIndex(relativeName);
+                    } catch (final IOException | InterruptedException e) {
+                        LOGGER.error("Exception deleting {}", p, e);
+                    }
+                    // Clean any newly empty directories.
+                    do {
+                        final File f = p.toFile();
+                        if (f.isDirectory() && f.list().length == 0) {
+                            f.delete();
+                        }
+                    } while ((p = p.getParent()) != null && !rootDir.equals(p));
+                });
+            }
             return;
         }
-        Stream<Path> stream = Files.find(indexRootPath, 100, (p, attr) -> attr.isDirectory() && isIndex(p));
-        try {
-            stream.forEach((p) -> {
-                final String relativeToExclusions = indexRootPath.relativize(p).toString();
-                if (exclusions != null && exclusions.indexOf(relativeToExclusions) != -1) {
-                    return;
-                }
-                final String relativeName = rootDir.relativize(p).toString();
+        // Recurse
+        try (var stream = Files.newDirectoryStream(path, parts[index])) {
+            stream.forEach(p -> {
                 try {
-                    deleteIndex(relativeName);
-                } catch (final IOException | InterruptedException e) {
-                    LOGGER.error("Exception deleting {}", p, e);
+                    deleteAll(p, parts, index + 1, exclusions);
+                } catch (IOException e) {
+                    LOGGER.warn("Exception during delete of " + rootDir.relativize(p), e);
                 }
-                // Clean any newly empty directories.
-                do {
-                    final File f = p.toFile();
-                    if (f.isDirectory() && f.list().length == 0) {
-                        f.delete();
-                    }
-                } while ((p = p.getParent()) != null && !rootDir.equals(p));
             });
-        } finally {
-            stream.close();
         }
     }
 

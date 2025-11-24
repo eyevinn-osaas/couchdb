@@ -16,7 +16,6 @@
 
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("couch_mrview/include/couch_mrview.hrl").
--include_lib("mem3/include/mem3.hrl").
 
 -export([
     handle_request/1,
@@ -30,7 +29,8 @@
     handle_view_cleanup_req/2,
     update_doc/4,
     http_code_from_status/1,
-    handle_partition_req/2
+    handle_partition_req/2,
+    handle_auto_purge_req/2
 ]).
 
 -import(
@@ -390,6 +390,41 @@ update_partition_stats(PathParts) ->
             ok
     end.
 
+handle_auto_purge_req(#httpd{method = 'GET'} = Req, Db) ->
+    case fabric:get_auto_purge_props(Db) of
+        {ok, AutoPurgeProps} ->
+            send_json(Req, {AutoPurgeProps});
+        {error, Reason} ->
+            chttpd:send_error(Req, Reason)
+    end;
+handle_auto_purge_req(#httpd{method = 'PUT'} = Req, Db) ->
+    {AutoPurgeProps} = chttpd:json_body_obj(Req),
+    validate_auto_purge_props(AutoPurgeProps),
+    case fabric:set_auto_purge_props(Db, AutoPurgeProps) of
+        ok ->
+            send_json(Req, 201, {[{ok, true}]});
+        {error, Reason} ->
+            chttpd:send_error(Req, Reason)
+    end;
+handle_auto_purge_req(#httpd{} = Req, _Db) ->
+    send_method_not_allowed(Req, "GET,PUT,HEAD").
+
+validate_auto_purge_props([]) ->
+    ok;
+validate_auto_purge_props([{<<"deleted_document_ttl">>, Value} | Rest]) when is_binary(Value) ->
+    case couch_scanner_util:parse_non_weekday_period(?b2l(Value)) of
+        undefined ->
+            throw({bad_request, <<"deleted_document_ttl must be a valid string">>});
+        _TTL ->
+            validate_auto_purge_props(Rest)
+    end;
+validate_auto_purge_props([{<<"deleted_document_ttl">>, _Value} | _Rest]) ->
+    throw({bad_request, <<"deleted_document_ttl must be a valid string">>});
+validate_auto_purge_props([{_K, _V} | _Rest]) ->
+    throw({bad_request, <<"invalid auto purge property">>});
+validate_auto_purge_props(_Else) ->
+    throw({bad_request, <<"malformed auto purge body">>}).
+
 handle_design_req(
     #httpd{
         path_parts = [_DbName, _Design, Name, <<"_", _/binary>> = Action | _Rest]
@@ -454,8 +489,7 @@ delete_db_req(#httpd{} = Req, DbName) ->
     end.
 
 do_db_req(#httpd{path_parts = [DbName | _], user_ctx = Ctx} = Req, Fun) ->
-    Shard = hd(mem3:shards(DbName)),
-    Props = couch_util:get_value(props, Shard#shard.opts, []),
+    Props = mem3:props(DbName),
     Opts =
         case Ctx of
             undefined ->
@@ -695,22 +729,17 @@ db_req(#httpd{method = 'POST', path_parts = [_, <<"_purge">>]} = Req, Db) ->
     Options = [{user_ctx, Req#httpd.user_ctx}, {w, W}],
     {IdsRevs} = chttpd:json_body_obj(Req),
     IdsRevs2 = [{Id, couch_doc:parse_revs(Revs)} || {Id, Revs} <- IdsRevs],
-    MaxIds = config:get_integer("purge", "max_document_id_number", 100),
-    case length(IdsRevs2) =< MaxIds of
-        false -> throw({bad_request, "Exceeded maximum number of documents."});
-        true -> ok
-    end,
-    RevsLen = lists:foldl(
-        fun({_Id, Revs}, Acc) ->
-            length(Revs) + Acc
-        end,
-        0,
-        IdsRevs2
-    ),
-    MaxRevs = config:get_integer("purge", "max_revisions_number", 1000),
-    case RevsLen =< MaxRevs of
-        false -> throw({bad_request, "Exceeded maximum number of revisions."});
-        true -> ok
+    case config:get("purge", "max_revisions_number", "infinity") of
+        "infinity" ->
+            ok;
+        Val ->
+            MaxRevs = list_to_integer(Val),
+            SumFun = fun({_Id, Revs}, Acc) -> length(Revs) + Acc end,
+            RevsLen = lists:foldl(SumFun, 0, IdsRevs2),
+            case RevsLen =< MaxRevs of
+                false -> throw({bad_request, "Exceeded maximum number of revisions."});
+                true -> ok
+            end
     end,
     couch_stats:increment_counter([couchdb, document_purges, total], length(IdsRevs2)),
     Results2 =
@@ -870,6 +899,30 @@ db_req(#httpd{method = 'GET', path_parts = [_, <<"_purged_infos_limit">>]} = Req
     send_json(Req, fabric:get_purge_infos_limit(Db));
 db_req(#httpd{path_parts = [_, <<"_purged_infos_limit">>]} = Req, _Db) ->
     send_method_not_allowed(Req, "GET,PUT");
+db_req(#httpd{method = 'GET', path_parts = [_, <<"_time_seq">>]} = Req, Db) ->
+    Options = [{user_ctx, Req#httpd.user_ctx}],
+    case fabric:time_seq_histogram(Db, Options) of
+        {ok, #{} = RangeNodeToHist} ->
+            Props = maps:fold(
+                fun([B, E], #{} = ByNode, Acc) ->
+                    Range = mem3_util:range_to_hex([B, E]),
+                    [{Range, ByNode} | Acc]
+                end,
+                [],
+                RangeNodeToHist
+            ),
+            send_json(Req, {[{<<"time_seq">>, {lists:sort(Props)}}]});
+        Error ->
+            throw(Error)
+    end;
+db_req(#httpd{method = 'DELETE', path_parts = [_, <<"_time_seq">>]} = Req, Db) ->
+    Options = [{user_ctx, Req#httpd.user_ctx}],
+    case fabric:set_time_seq(Db, couch_time_seq:new(), Options) of
+        ok -> send_json(Req, {[{<<"ok">>, true}]});
+        Error -> throw(Error)
+    end;
+db_req(#httpd{path_parts = [_, <<"_time_seq">>]} = Req, _Db) ->
+    send_method_not_allowed(Req, "GET,DELETE");
 % Special case to enable using an unencoded slash in the URL of design docs,
 % as slashes in document IDs must otherwise be URL encoded.
 db_req(
@@ -948,14 +1001,12 @@ multi_all_docs_view(Req, Db, OP, Queries) ->
 
 all_docs_view(Req, Db, Keys, OP) ->
     Args0 = couch_mrview_http:parse_body_and_query(Req, Keys),
-    Args1 = Args0#mrargs{view_type = map},
-    Args2 = fabric_util:validate_all_docs_args(Db, Args1),
-    Args3 = set_namespace(OP, Args2),
-    Args4 = set_include_sysdocs(OP, Req, Args3),
+    Args1 = set_namespace(OP, Args0),
+    Args2 = set_include_sysdocs(OP, Req, Args1),
     Options = [{user_ctx, Req#httpd.user_ctx}],
     Max = chttpd:chunked_response_buffer_size(),
     VAcc = #vacc{db = Db, req = Req, threshold = Max},
-    {ok, Resp} = fabric:all_docs(Db, Options, fun view_cb/2, VAcc, Args4),
+    {ok, Resp} = fabric:all_docs(Db, Options, fun view_cb/2, VAcc, Args2),
     {ok, Resp#vacc.resp}.
 
 view_cb({row, Row} = Msg, Acc) ->
@@ -986,18 +1037,16 @@ db_doc_req(#httpd{method = 'GET', mochi_req = MochiReq} = Req, Db, DocId) ->
         options = Options0,
         atts_since = AttsSince
     } = parse_doc_query(Req),
-    Options = [{user_ctx, Req#httpd.user_ctx} | Options0],
+    Options1 = [{user_ctx, Req#httpd.user_ctx} | Options0],
+    Options2 =
+        case AttsSince of
+            nil -> Options1;
+            _ -> [{atts_since, AttsSince}, attachments | Options1]
+        end,
     case Revs of
         [] ->
-            Options2 =
-                if
-                    AttsSince /= nil ->
-                        [{atts_since, AttsSince}, attachments | Options];
-                    true ->
-                        Options
-                end,
             Rev =
-                case lists:member(latest, Options) of
+                case lists:member(latest, Options2) of
                     % couch_doc_open will open the winning rev despite of a rev passed
                     % https://docs.couchdb.org/en/stable/api/document/common.html?highlight=latest#get--db-docid
                     true -> nil;
@@ -1006,7 +1055,7 @@ db_doc_req(#httpd{method = 'GET', mochi_req = MochiReq} = Req, Db, DocId) ->
             Doc = couch_doc_open(Db, DocId, Rev, Options2),
             send_doc(Req, Doc, Options2);
         _ ->
-            case fabric:open_revs(Db, DocId, Revs, Options) of
+            case fabric:open_revs(Db, DocId, Revs, Options2) of
                 {ok, []} when Revs == all ->
                     chttpd:send_error(Req, {not_found, missing});
                 {ok, Results} ->
@@ -1021,7 +1070,7 @@ db_doc_req(#httpd{method = 'GET', mochi_req = MochiReq} = Req, Db, DocId) ->
                                 fun(Result, AccSeparator) ->
                                     case Result of
                                         {ok, Doc} ->
-                                            JsonDoc = couch_doc:to_json_obj(Doc, Options),
+                                            JsonDoc = couch_doc:to_json_obj(Doc, Options2),
                                             Json = ?JSON_ENCODE({[{ok, JsonDoc}]}),
                                             send_chunk(Resp, AccSeparator ++ Json);
                                         {{not_found, missing}, RevId} ->
@@ -1038,7 +1087,7 @@ db_doc_req(#httpd{method = 'GET', mochi_req = MochiReq} = Req, Db, DocId) ->
                             send_chunk(Resp, "]"),
                             end_json_response(Resp);
                         true ->
-                            send_docs_multipart(Req, Results, Options)
+                            send_docs_multipart(Req, Results, Options2)
                     end;
                 {error, Error} ->
                     chttpd:send_error(Req, Error)
@@ -1423,7 +1472,7 @@ receive_request_data(Req, Len) when Len == chunked ->
         GetChunk
     };
 receive_request_data(Req, LenLeft) when LenLeft > 0 ->
-    Len = erlang:min(4096, LenLeft),
+    Len = min(4096, LenLeft),
     Data = chttpd:recv(Req, Len),
     {Data, fun() -> receive_request_data(Req, LenLeft - iolist_size(Data)) end};
 receive_request_data(_Req, _) ->
@@ -1464,13 +1513,13 @@ purge_results_to_json([{DocId, _Revs} | RIn], [{accepted, PRevs} | ROut]) ->
     {Code, Results} = purge_results_to_json(RIn, ROut),
     couch_stats:increment_counter([couchdb, document_purges, success]),
     NewResults = [{DocId, couch_doc:revs_to_strs(PRevs)} | Results],
-    {erlang:max(Code, 202), NewResults};
+    {max(Code, 202), NewResults};
 purge_results_to_json([{DocId, _Revs} | RIn], [Error | ROut]) ->
     {Code, Results} = purge_results_to_json(RIn, ROut),
     {NewCode, ErrorStr, Reason} = chttpd:error_info(Error),
     couch_stats:increment_counter([couchdb, document_purges, failure]),
     NewResults = [{DocId, {[{error, ErrorStr}, {reason, Reason}]}} | Results],
-    {erlang:max(NewCode, Code), NewResults}.
+    {max(NewCode, Code), NewResults}.
 
 send_updated_doc(Req, Db, DocId, Json) ->
     send_updated_doc(Req, Db, DocId, Json, []).
@@ -1530,9 +1579,9 @@ update_doc(Db, DocId, #doc{deleted = Deleted, body = DocBody} = Doc, Options) ->
             {'DOWN', Ref, _, _, {exit_throw, Reason}} ->
                 throw(Reason);
             {'DOWN', Ref, _, _, {exit_error, Reason}} ->
-                erlang:error(Reason);
+                error(Reason);
             {'DOWN', Ref, _, _, {exit_exit, Reason}} ->
-                erlang:exit(Reason)
+                exit(Reason)
         end,
 
     case Result of

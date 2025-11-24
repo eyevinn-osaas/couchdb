@@ -23,6 +23,7 @@
     shards/2,
     db_opened/2,
     doc_id/3,
+    doc_fdi/3,
     doc/3,
     db_closing/2
 ]).
@@ -50,7 +51,11 @@
 % DDoc fields
 
 -define(FILTERS, <<"filters">>).
+-define(UPDATES, <<"updates">>).
 -define(VIEWS, <<"views">>).
+-define(CLOUSEAU, <<"indexes">>).
+-define(NOUVEAU, <<"nouveau">>).
+-define(INDEX, <<"index">>).
 -define(MAP, <<"map">>).
 -define(REDUCE, <<"reduce">>).
 -define(LIB, <<"lib">>).
@@ -59,6 +64,31 @@
 % Avoid checking indeterministic functions. They always show as false positives
 %
 -define(INTEDERMINISM_HEURISTICS, [<<"Math.random()">>, <<"Date.now()">>, <<"new Date()">>]).
+
+% Mock JS request object. Used by filter and update handlers
+% See https://docs.couchdb.org/en/stable/json-structure.html#request-object
+-define(MOCK_REQ, #{
+    <<"info">> => #{
+        <<"committed_update_seq">> => 42,
+        <<"db_name">> => <<"foo">>,
+        <<"doc_count">> => 42,
+        <<"doc_del_count">> => 42,
+        <<"sizes">> => #{<<"active">> => 42, <<"disk">> => 42, <<"external">> => 42}
+    },
+    <<"query">> => #{},
+    <<"body">> => <<"{}">>,
+    <<"method">> => <<"POST">>,
+    <<"headers">> => #{},
+    <<"form">> => #{},
+    <<"cookie">> => #{},
+    <<"userCtx">> => #{},
+    <<"secObj">> => #{},
+    <<"path">> => [<<"a">>, <<"b">>, <<"c">>],
+    <<"requested_path">> => [<<"a">>, <<"b">>, <<"c">>],
+    <<"raw_path">> => <<"a/b/c">>,
+    <<"peer">> => <<"127.0.0.1">>,
+    <<"uuid">> => <<"2f3aaf5c54d94f982f384c6f8000197b">>
+}).
 
 % Behavior callbacks
 
@@ -120,7 +150,7 @@ db_opened(#st{} = St, Db) ->
     #st{max_docs = MaxDocs, max_step = MaxStep} = St,
     {ok, DocTotal} = couch_db:get_doc_count(Db),
     Step = min(MaxStep, max(1, DocTotal div MaxDocs)),
-    {ok, St#st{doc_cnt = 0, doc_step = Step, docs = []}}.
+    {0, [], St#st{doc_cnt = 0, docs_size = 0, doc_step = Step, docs = []}}.
 
 doc_id(#st{} = St, <<?DESIGN_DOC_PREFIX, _/binary>>, _Db) ->
     {skip, St};
@@ -133,12 +163,18 @@ doc_id(#st{doc_cnt = C, doc_step = S} = St, _DocId, _Db) when C rem S /= 0 ->
 doc_id(#st{doc_cnt = C} = St, _DocId, _Db) ->
     {ok, St#st{doc_cnt = C + 1}}.
 
+doc_fdi(#st{} = St, #full_doc_info{deleted = true}, _Db) ->
+    % Skip deleted; don't even open the doc body
+    {skip, St};
+doc_fdi(#st{} = St, #full_doc_info{}, _Db) ->
+    {ok, St}.
+
 doc(#st{} = St, Db, #doc{id = DocId} = Doc) ->
     #st{sid = SId} = St,
     JsonDoc = couch_query_servers:json_doc(Doc),
     try
         St1 = maybe_reset_and_teach_ddocs(St),
-        process_doc_filter_and_vdu(St1, Db, DocId, JsonDoc),
+        process_ddoc_functions(St1, Db, DocId, JsonDoc),
         process_doc_views(St1, Db, JsonDoc)
     catch
         Tag:Err:Stack ->
@@ -150,8 +186,10 @@ doc(#st{} = St, Db, #doc{id = DocId} = Doc) ->
 db_closing(#st{docs = []} = St, _Db) ->
     {ok, St#st{doc_cnt = 0, doc_step = 0}};
 db_closing(#st{ddocs = DDocs} = St, Db) ->
-    {_Db, St1} = maps:fold(fun views_validate/3, {Db, St}, DDocs),
-    {ok, St1#st{doc_cnt = 0, doc_step = 0, docs = []}}.
+    {_, St1} = maps:fold(fun views_validate/3, {Db, St}, DDocs),
+    {_, St2} = maps:fold(fun clouseau_validate/3, {Db, St1}, DDocs),
+    {_, St3} = maps:fold(fun nouveau_validate/3, {Db, St2}, DDocs),
+    {ok, St3#st{doc_cnt = 0, doc_step = 0, docs = []}}.
 
 % Private
 
@@ -177,10 +215,18 @@ process_ddoc(#st{} = St, DbName, #doc{} = DDoc0) ->
             St1 = start_or_reset_procs(St),
             try
                 Views = maps:get(?VIEWS, DDoc, undefined),
+                Clouseau = maps:get(?CLOUSEAU, DDoc, undefined),
+                Nouveau = maps:get(?NOUVEAU, DDoc, undefined),
+                Filters = maps:get(?FILTERS, DDoc, undefined),
+                Updates = maps:get(?UPDATES, DDoc, undefined),
+                Vdu = maps:get(?VDU, DDoc, undefined),
                 lib_load(St1, Views),
-                views_load(St1, valid_views(Views)),
-                filters_load(St1, maps:get(?FILTERS, DDoc, undefined)),
-                vdu_load(St1, maps:get(?VDU, DDoc, undefined)),
+                views_load(St1, views(Views)),
+                clouseau_load(St1, indexes(Clouseau)),
+                nouveau_load(St1, indexes(Nouveau)),
+                filters_load(St1, filters(Filters)),
+                updates_load(St1, updates(Updates)),
+                vdu_load(St1, vdu(Vdu)),
                 St2 = start_or_reset_procs(St1),
                 teach_ddoc_validate(St2, DDocId, DDoc),
                 St2#st{ddocs = DDocs#{DDocId => DDoc}}
@@ -198,14 +244,16 @@ process_ddoc(#st{} = St, DbName, #doc{} = DDoc0) ->
             St
     end.
 
-process_doc_filter_and_vdu(#st{} = St, Db, DocId, JsonDoc) ->
+process_ddoc_functions(#st{} = St, Db, DocId, JsonDoc) ->
     #st{sid = SId, ddocs = DDocs} = St,
     DDocFun = fun(DDocId, #{} = DDoc) ->
         try
             Filters = maps:get(?FILTERS, DDoc, undefined),
-            filter_doc_validate(St, DDocId, Filters, JsonDoc),
             VDU = maps:get(?VDU, DDoc, undefined),
-            vdu_doc_validate(St, DDocId, VDU, JsonDoc)
+            Updates = maps:get(?UPDATES, DDoc, undefined),
+            filter_doc_validate(St, DDocId, filters(Filters), JsonDoc),
+            vdu_doc_validate(St, DDocId, vdu(VDU), JsonDoc),
+            update_doc_validate(St, DDocId, updates(Updates), JsonDoc)
         catch
             throw:{validate, Error} ->
                 Meta = #{sid => SId, db => Db, ddoc => DDocId, doc => DocId},
@@ -234,9 +282,11 @@ process_doc_views(#st{} = St, Db, JsonDoc) ->
             St1 = St#st{docs = [JsonDoc | Docs], docs_size = DocsSize1},
             {ok, St1};
         false ->
-            {_Db, St1} = maps:fold(fun views_validate/3, {Db, St}, DDocs),
-            St2 = St1#st{docs = [], docs_size = 0},
-            {ok, St2}
+            {_, St1} = maps:fold(fun views_validate/3, {Db, St}, DDocs),
+            {_, St2} = maps:fold(fun clouseau_validate/3, {Db, St1}, DDocs),
+            {_, St3} = maps:fold(fun nouveau_validate/3, {Db, St2}, DDocs),
+            St4 = St3#st{docs = [], docs_size = 0},
+            {ok, St4}
     end.
 
 views_validate(DDocId, #{?VIEWS := Views}, {Db, #st{} = St0}) when
@@ -246,18 +296,23 @@ views_validate(DDocId, #{?VIEWS := Views}, {Db, #st{} = St0}) when
     #st{sid = SId, docs = Docs} = St,
     try
         lib_load(St, Views),
-        ViewList = lists:sort(maps:to_list(valid_views(Views))),
+        ViewList = lists:sort(maps:to_list(views(Views))),
         case ViewList of
             [_ | _] ->
                 Fun = fun({Name, #{?MAP := Src}}) -> add_fun_load(St, Name, Src) end,
                 lists:foreach(Fun, ViewList),
-                {[_ | _], St1 = #st{}} = lists:foldl(fun mapred_fold/2, {ViewList, St}, Docs),
+                {[_ | _], St1 = #st{}} = lists:foldl(fun view_mapred_fold/2, {ViewList, St}, Docs),
                 {Db, St1};
             [] ->
                 % There may be no valid views left
                 {Db, St}
         end
     catch
+        throw:restart_procs ->
+            #st{qjs_proc = Qjs, sm_proc = Sm} = St,
+            proc_stop(Sm),
+            proc_stop(Qjs),
+            {Db, St#st{qjs_proc = undefined, sm_proc = undefined}};
         throw:{validate, Error} ->
             Meta = #{sid => SId, db => Db, ddoc => DDocId},
             validation_warning("view validation failed ~p", Error, Meta),
@@ -271,7 +326,7 @@ views_validate(_DDocId, #{} = _DDoc, {Db, #st{} = St}) ->
     % No views
     {Db, St}.
 
-mapred_fold({Props = [_ | _]} = Doc, {ViewList = [_ | _], #st{} = St}) ->
+view_mapred_fold({Props = [_ | _]} = Doc, {ViewList = [_ | _], #st{} = St}) ->
     #st{qjs_proc = Qjs, sm_proc = Sm} = St,
     DocId = couch_util:get_value(<<"_id">>, Props),
     SmMapRes = map_doc(Sm, Doc),
@@ -280,15 +335,100 @@ mapred_fold({Props = [_ | _]} = Doc, {ViewList = [_ | _], #st{} = St}) ->
         true -> ok;
         false -> throw({validate, {map_doc, DocId, QjsMapRes, SmMapRes}})
     end,
-    case QjsMapRes of
-        [_ | _] ->
-            MapResZip = lists:zip(ViewList, QjsMapRes),
-            ReduceKVs = lists:filtermap(fun reduce_filter_map/1, MapResZip),
-            view_reduce_validate(St, ReduceKVs);
-        _ ->
-            ok
-    end,
-    {ViewList, St}.
+    % Calling list functions from a map will result in a result list
+    % longer than the number of views, so we match that the view list
+    % and the results match
+    case length(QjsMapRes) =:= length(ViewList) of
+        true ->
+            case QjsMapRes of
+                [_ | _] ->
+                    MapResZip = lists:zip(ViewList, QjsMapRes),
+                    ReduceKVs = lists:filtermap(fun reduce_filter_map/1, MapResZip),
+                    view_reduce_validate(St, ReduceKVs);
+                _ ->
+                    ok
+            end,
+            {ViewList, St};
+        false ->
+            % Exit early as calling list functions from a map leads to breaking the
+            % query protocol. To avoid the messed up state affecting other views
+            % exit early and restart the processes.
+            throw(restart_procs)
+    end.
+
+clouseau_validate(DDocId, #{?CLOUSEAU := Indexes0}, {Db, #st{} = St}) when map_size(Indexes0) > 0 ->
+    Indexes = indexes(Indexes0),
+    {Db1, _, St1} = maps:fold(fun clouseau_validate_mapfold/3, {Db, DDocId, St}, Indexes),
+    {Db1, St1};
+clouseau_validate(_DDocId, #{} = _DDoc, {Db, #st{} = St}) ->
+    % No clouseau indexes
+    {Db, St}.
+
+nouveau_validate(DDocId, #{?NOUVEAU := Indexes0}, {Db, #st{} = St}) when map_size(Indexes0) > 0 ->
+    Indexes = indexes(Indexes0),
+    {Db1, _, St1} = maps:fold(fun nouveau_validate_mapfold/3, {Db, DDocId, St}, Indexes),
+    {Db1, St1};
+nouveau_validate(_DDocId, #{}, {Db, #st{} = St}) ->
+    % No nouveau indexes
+    {Db, St}.
+
+clouseau_validate_mapfold(IndexName, IndexSrc, {Db, DDocId, #st{} = St0}) ->
+    St = start_or_reset_procs(St0),
+    #st{sid = SId, docs = Docs, qjs_proc = Qjs, sm_proc = Sm} = St,
+    try
+        add_fun(Sm, IndexSrc),
+        add_fun(Qjs, IndexSrc),
+        St1 = #st{} = lists:foldl(fun clouseau_foldl/2, St, Docs),
+        {Db, DDocId, St1}
+    catch
+        throw:{validate, Error} ->
+            Meta = #{sid => SId, db => Db, ddoc => DDocId, index => IndexName},
+            validation_warning("clouseau validation failed ~p", Error, Meta),
+            {Db, DDocId, St};
+        Tag:Err:Stack ->
+            Meta = #{sid => SId, db => Db, ddoc => DDocId, index => IndexName},
+            ?ERR("clouseau validation exception ~p:~p:~p", [Tag, Err, Stack], Meta),
+            {Db, DDocId, St}
+    end.
+
+nouveau_validate_mapfold(IndexName, IndexSrc, {Db, DDocId, #st{} = St0}) ->
+    St = start_or_reset_procs(St0),
+    #st{sid = SId, docs = Docs, qjs_proc = Qjs, sm_proc = Sm} = St,
+    try
+        nouveau_add_fun(Sm, IndexSrc),
+        nouveau_add_fun(Qjs, IndexSrc),
+        St1 = #st{} = lists:foldl(fun nouveau_foldl/2, St, Docs),
+        {Db, DDocId, St1}
+    catch
+        throw:{validate, Error} ->
+            Meta = #{sid => SId, db => Db, ddoc => DDocId, index => IndexName},
+            validation_warning("nouveau validation failed ~p", Error, Meta),
+            {Db, DDocId, St};
+        Tag:Err:Stack ->
+            Meta = #{sid => SId, db => Db, ddoc => DDocId, index => IndexName},
+            ?ERR("nouveau validation exception ~p:~p:~p", [Tag, Err, Stack], Meta),
+            {Db, DDocId, St}
+    end.
+
+clouseau_foldl({Props = [_ | _]} = Doc, #st{} = St) ->
+    #st{qjs_proc = Qjs, sm_proc = Sm} = St,
+    DocId = couch_util:get_value(<<"_id">>, Props),
+    SmMapRes = clouseau_index_doc(Sm, Doc),
+    QjsMapRes = clouseau_index_doc(Qjs, Doc),
+    case QjsMapRes == SmMapRes of
+        true -> St;
+        false -> throw({validate, {clouseau_index, DocId, QjsMapRes, SmMapRes}})
+    end.
+
+nouveau_foldl({Props = [_ | _]} = Doc, #st{} = St) ->
+    #st{qjs_proc = Qjs, sm_proc = Sm} = St,
+    DocId = couch_util:get_value(<<"_id">>, Props),
+    SmMapRes = nouveau_index_doc(Sm, Doc),
+    QjsMapRes = nouveau_index_doc(Qjs, Doc),
+    case QjsMapRes == SmMapRes of
+        true -> St;
+        false -> throw({validate, {nouveau_index, DocId, QjsMapRes, SmMapRes}})
+    end.
 
 reset_per_db_state(#st{qjs_proc = QjsProc, sm_proc = SmProc} = St) ->
     proc_stop(SmProc),
@@ -296,6 +436,7 @@ reset_per_db_state(#st{qjs_proc = QjsProc, sm_proc = SmProc} = St) ->
     St#st{
         ddocs = #{},
         docs = [],
+        docs_size = 0,
         qjs_proc = undefined,
         sm_proc = undefined,
         ddoc_cnt = 0
@@ -345,7 +486,7 @@ start_or_reset_sm_proc(#st{sm_proc = #proc{} = Proc} = St) ->
             start_or_reset_sm_proc(St#st{sm_proc = undefined})
     end.
 
-valid_views(#{} = Views) ->
+views(#{} = Views) ->
     Fun = fun
         (?LIB, _) ->
             false;
@@ -357,8 +498,48 @@ valid_views(#{} = Views) ->
             false
     end,
     maps:filter(Fun, Views);
-valid_views(_) ->
+views(_) ->
     #{}.
+
+indexes(#{} = Indexes) ->
+    Fun = fun
+        (<<_/binary>> = IndexName, #{?INDEX := <<IndexFun/binary>>}, #{} = Acc) ->
+            case no_indeterminism(IndexFun) of
+                true -> Acc#{IndexName => IndexFun};
+                false -> Acc
+            end;
+        (_, _, #{} = Acc) ->
+            Acc
+    end,
+    maps:fold(Fun, #{}, Indexes);
+indexes(_) ->
+    #{}.
+
+updates(#{} = Updates) ->
+    Fun = fun
+        (<<_/binary>>, <<FunSrc/binary>>) -> no_indeterminism(FunSrc);
+        (_, _) -> false
+    end,
+    maps:filter(Fun, Updates);
+updates(_) ->
+    #{}.
+
+filters(#{} = Filters) ->
+    Fun = fun
+        (<<_/binary>>, <<FunSrc/binary>>) -> no_indeterminism(FunSrc);
+        (_, _) -> false
+    end,
+    maps:filter(Fun, Filters);
+filters(_) ->
+    #{}.
+
+vdu(<<FunSrc/binary>>) ->
+    case no_indeterminism(FunSrc) of
+        true -> FunSrc;
+        false -> undefined
+    end;
+vdu(_) ->
+    undefined.
 
 % Math.random(), Date.now() or new Date() will always show as false postives
 %
@@ -391,6 +572,29 @@ view_load(#st{} = St, Name, View) ->
     add_fun_load(St, Name, MapSrc),
     RedSrc = maps:get(?REDUCE, View, undefined),
     add_fun_load(St, Name, RedSrc).
+
+clouseau_load(#st{} = St, #{} = Indexes) ->
+    % Note: we can re-use views add_fun_load here
+    Fun = fun(Name, <<FunSrc/binary>>) -> add_fun_load(St, Name, FunSrc) end,
+    maps:foreach(Fun, Indexes);
+clouseau_load(#st{}, _) ->
+    ok.
+
+nouveau_load(#st{} = St, #{} = Indexes) ->
+    Fun = fun(Name, <<FunSrc/binary>>) -> nouveau_add_fun_load(St, Name, FunSrc) end,
+    maps:foreach(Fun, Indexes);
+nouveau_load(#st{}, _) ->
+    ok.
+
+nouveau_add_fun_load(#st{qjs_proc = Qjs, sm_proc = Sm}, Name, <<_/binary>> = Src) ->
+    SmRes = nouveau_add_fun(Sm, Src),
+    QjsRes = nouveau_add_fun(Qjs, Src),
+    case QjsRes == SmRes of
+        true -> ok;
+        false -> throw({validate, {nouveau_add_fun, Name, QjsRes, SmRes}})
+    end;
+nouveau_add_fun_load(#st{}, _, _) ->
+    ok.
 
 add_fun_load(#st{qjs_proc = Qjs, sm_proc = Sm}, Name, <<_/binary>> = Src) ->
     SmRes = add_fun(Sm, Src),
@@ -459,6 +663,34 @@ filter_doc_validate(#st{} = St, DDocId, #{} = Filters, Doc) ->
     end,
     maps:foreach(Fun, Filters);
 filter_doc_validate(#st{}, _, _, _) ->
+    ok.
+
+updates_load(#st{} = St, #{} = Updates) ->
+    Fun = fun(Name, Update) -> update_load(St, Name, Update) end,
+    maps:foreach(Fun, Updates);
+updates_load(#st{}, _) ->
+    ok.
+
+update_load(#st{qjs_proc = Qjs, sm_proc = Sm}, Name, Update) ->
+    SmRes = add_fun(Sm, Update),
+    QjsRes = add_fun(Qjs, Update),
+    case QjsRes == SmRes of
+        true -> ok;
+        false -> throw({validate, {update, Name, QjsRes, SmRes}})
+    end.
+
+update_doc_validate(#st{} = St, DDocId, #{} = Updates, Doc) ->
+    #st{qjs_proc = Qjs, sm_proc = Sm} = St,
+    Fun = fun(UName, _) ->
+        SmRes = update_doc(Sm, DDocId, UName, Doc),
+        QjsRes = update_doc(Qjs, DDocId, UName, Doc),
+        case QjsRes == SmRes of
+            true -> ok;
+            false -> throw({validate, {update_doc, UName, QjsRes, SmRes}})
+        end
+    end,
+    maps:foreach(Fun, Updates);
+update_doc_validate(#st{}, _, _, _) ->
     ok.
 
 vdu_load(#st{qjs_proc = Qjs, sm_proc = Sm}, <<_/binary>> = VDU) ->
@@ -546,6 +778,8 @@ expected_error({error, {_, {<<"SyntaxError">>, _}}}, {error, {_, {<<"SyntaxError
     true;
 expected_error({error, {_, {<<"ReferenceError">>, _}}}, {error, {_, {<<"ReferenceError">>, _}}}) ->
     true;
+expected_error({error, {_, {<<"render_error">>, _}}}, {error, {_, {<<"render_error">>, _}}}) ->
+    true;
 expected_error(_, _) ->
     false.
 
@@ -582,10 +816,37 @@ add_fun(#proc{} = Proc, <<_/binary>> = FunSrc) ->
 add_fun(#proc{}, _) ->
     ok.
 
+nouveau_add_fun(#proc{} = Proc, <<_/binary>> = FunSrc) ->
+    prompt(Proc, [<<"add_fun">>, FunSrc, <<"nouveau">>]);
+nouveau_add_fun(#proc{}, _) ->
+    ok.
+
+clouseau_index_doc(#proc{} = Proc, {[_ | _]} = Doc) ->
+    case prompt(Proc, [<<"index_doc">>, Doc]) of
+        [Fields | _] -> lists:sort(Fields);
+        [] -> []
+    end.
+
+nouveau_index_doc(#proc{} = Proc, {[_ | _]} = Doc) ->
+    case prompt(Proc, [<<"nouveau_index_doc">>, Doc]) of
+        [Fields | _] -> lists:sort(Fields);
+        [] -> []
+    end.
+
 filter_doc(#proc{} = Proc, DDocId, FName, {[_ | _]} = Doc) ->
     % Add a mock request object so param access doesn't throw a TypeError
-    MockReq = #{<<"query">> => #{}},
-    prompt(Proc, [<<"ddoc">>, DDocId, [<<"filters">>, FName], [[Doc], MockReq]]).
+    prompt(Proc, [<<"ddoc">>, DDocId, [<<"filters">>, FName], [[Doc], ?MOCK_REQ]]).
+
+update_doc(#proc{} = Proc, DDocId, UName, {[_ | _] = Props} = Doc) ->
+    % Use a mock object. It's better than nothing at least. We don't know
+    % what the user might post.
+    MockReq = ?MOCK_REQ,
+    MockReq1 =
+        case couch_util:get_value(<<"_id">>, Props) of
+            Id when is_binary(Id) -> MockReq#{<<"id">> => Id};
+            _ -> MockReq
+        end,
+    prompt(Proc, [<<"ddoc">>, DDocId, [<<"updates">>, UName], [Doc, MockReq1]]).
 
 vdu_doc(#proc{} = Proc, DDocId, {[_ | _]} = Doc) ->
     prompt(Proc, [<<"ddoc">>, DDocId, [<<"validate_doc_update">>], [Doc, Doc]]).
@@ -604,6 +865,8 @@ proc_reset(#proc{} = Proc) ->
 
 % Proc utils
 
+is_proc_alive(undefined) ->
+    false;
 is_proc_alive(#proc{pid = Pid}) ->
     is_process_alive(Pid).
 

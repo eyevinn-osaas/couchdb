@@ -95,6 +95,10 @@ EXUNIT_OPTS=$(subst $(comma),$(space),$(tests))
 
 TEST_OPTS="-c 'startup_jitter=0' -c 'default_security=admin_local' -c 'iterations=9'"
 
+ifneq ($(ERLANG_COOKIE),)
+TEST_OPTS+=" --erlang-cookie=$(ERLANG_COOKIE)"
+endif
+
 ################################################################################
 # Main commands
 ################################################################################
@@ -235,7 +239,8 @@ ifeq ($(with_nouveau), false)
 endif
 
 .PHONY: elixir-init
-elixir-init: MIX_ENV=integration
+elixir-init: export MIX_ENV=integration
+elixir-init: export ELIXIR_ERL_OPTIONS=+fnu
 elixir-init: config.erl
 	@mix local.rebar --force rebar3 ./bin/rebar3 && mix local.hex --force && mix deps.get
 
@@ -287,6 +292,7 @@ endif
 .PHONY: elixir-source-checks
 # target: elixir-source-checks - Check source code formatting of Elixir test files
 elixir-source-checks: export MIX_ENV=integration
+elixir-source-checks: export ELIXIR_ERL_OPTIONS=+fnu
 elixir-source-checks: elixir-init
 	@mix format --check-formatted
 	@mix credo
@@ -339,7 +345,7 @@ mango-test: devclean all
 		--admin=adm:pass \
 		--no-eval "\
 COUCH_USER=adm COUCH_PASS=pass \
-src/mango/.venv/bin/nose2 -s src/mango/test -c src/mango/unittest.cfg $(MANGO_TEST_OPTS)"
+src/mango/.venv/bin/nose2 -F -s src/mango/test -c src/mango/unittest.cfg $(MANGO_TEST_OPTS)"
 
 
 .PHONY: weatherreport-test
@@ -347,6 +353,12 @@ src/mango/.venv/bin/nose2 -s src/mango/test -c src/mango/unittest.cfg $(MANGO_TE
 weatherreport-test: devclean escriptize
 	@dev/run "$(TEST_OPTS)" -n 1 -a adm:pass --no-eval \
 		'bin/weatherreport --etc dev/lib/node1/etc --level error'
+
+.PHONY: quickjs-test262
+# target: quickjs-javascript-tests - Run QuickJS JS conformance tests
+quickjs-test262: couch
+	make -C src/couch_quickjs/quickjs test2-bootstrap
+	make -C src/couch_quickjs/quickjs test2
 
 ################################################################################
 # Developing
@@ -472,7 +484,12 @@ clean:
 	@rm -rf .rebar/
 	@rm -f bin/couchjs
 	@rm -f bin/weatherreport
-	@rm -rf src/*/ebin
+	@find src/*/ebin \
+	  -not -path 'src/cowlib/ebin/cowlib.app' \
+	  -not -path 'src/cowlib/ebin' \
+	  -not -path 'src/gun/ebin/gun.app' \
+	  -not -path 'src/gun/ebin' \
+	  -delete
 	@rm -rf src/*/.rebar
 	@rm -rf src/*/priv/*.so
 	@rm -rf share/server/main.js share/server/main-ast-bypass.js share/server/main-coffee.js
@@ -480,7 +497,8 @@ clean:
 	@rm -rf src/mango/.venv
 	@rm -f src/couch/priv/couch_js/config.h
 	@rm -f dev/*.beam dev/devnode.* dev/pbkdf2.pyc log/crash.log
-	@rm -f src/couch_dist/certs/out
+	@rm -rf src/couch_dist/certs/out
+	@rm -rf src/docs/build src/docs/.venv
 ifeq ($(with_nouveau), true)
 	@cd nouveau && $(GRADLE) clean
 endif
@@ -492,12 +510,10 @@ distclean: clean
 	@rm -f install.mk
 	@rm -f config.erl
 	@rm -f rel/couchdb.config
-ifneq ($(IN_RELEASE), true)
-# when we are in a release, don’t delete the
-# copied sources, generated docs, or fauxton
 	@rm -rf rel/couchdb
+ifneq ($(IN_RELEASE), true)
+	# when we are in a release, don’t delete Fauxton
 	@rm -rf share/www
-	@rm -rf src/docs
 endif
 
 

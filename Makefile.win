@@ -93,6 +93,10 @@ EXUNIT_OPTS=$(subst $(comma),$(space),$(tests))
 
 TEST_OPTS="-c startup_jitter=0 -c default_security=admin_local -c iterations=9"
 
+ifneq ($(ERLANG_COOKIE),)
+TEST_OPTS+=" --erlang-cookie=$(ERLANG_COOKIE)"
+endif
+
 ################################################################################
 # Main commands
 ################################################################################
@@ -215,7 +219,8 @@ ifeq ($(with_nouveau), false)
 endif
 
 .PHONY: elixir-init
-elixir-init: MIX_ENV=integration
+elixir-init: export MIX_ENV=integration
+elixir-init: export ELIXIR_ERL_OPTIONS=+fnu
 elixir-init: config.erl
 	@mix local.rebar --force && mix local.hex --force && mix deps.get
 
@@ -268,6 +273,7 @@ endif
 .PHONY: elixir-source-checks
 # target: elixir-source-checks - Check source code formatting of Elixir test files
 elixir-source-checks: export MIX_ENV=integration
+elixir-source-checks: export ELIXIR_ERL_OPTIONS=+fnu
 elixir-source-checks: elixir-init
 	@mix format --check-formatted
 	@mix credo
@@ -310,7 +316,7 @@ mango-test: devclean all
 		--admin=adm:pass \
 		"\
 env COUCH_USER=adm COUCH_PASS=pass \
-src\mango\.venv\Scripts\nose2 -s src\mango\test -c src\mango\unittest.cfg $(MANGO_TEST_OPTS)"
+src\mango\.venv\Scripts\nose2 -F -s src\mango\test -c src\mango\unittest.cfg $(MANGO_TEST_OPTS)"
 
 
 ################################################################################
@@ -440,6 +446,7 @@ clean:
 	-@rmdir /s/q src\mango\.venv >NUL 2>&1 || true
 	-@del /f/q src\couch\priv\couch_js\config.h >NUL 2>&1 || true
 	-@del /f/q dev\boot_node.beam dev\pbkdf2.pyc log\crash.log >NUL 2>&1 || true
+	-@rmdir /s/q src\docs\build src\docs\.venv >NUL 2>&1 || true
 ifeq ($(with_nouveau), true)
 	@cd nouveau && $(GRADLE) clean
 endif
@@ -450,12 +457,10 @@ distclean: clean
 	-@del install.mk >NUL 2>&1 || true
 	-@del config.erl >NUL 2>&1 || true
 	-@del rel\couchdb.config >NUL 2>&1 || true
-ifneq ($(IN_RELEASE), true)
-# when we are in a release, don’t delete the
-# copied sources, generated docs, or fauxton
 	-@rmdir /s/q rel\couchdb >NUL 2>&1 || true
+ifneq ($(IN_RELEASE), true)
+    # when we are in a release, don’t delete Fauxton
 	-@rmdir /s/q share\www >NUL 2>&1 || true
-	-@rmdir /s/q src\docs >NUL 2>&1 || true
 endif
 
 

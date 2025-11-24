@@ -38,7 +38,8 @@
     revs_limit/1,
     uuid/1,
     epochs/1,
-    compacted_seq/1
+    compacted_seq/1,
+    time_seq_ptr/1
 ]).
 
 -include_lib("stdlib/include/assert.hrl").
@@ -58,7 +59,7 @@
 -record(db_header, {
     disk_version = ?LATEST_DISK_VERSION,
     update_seq = 0,
-    unused = 0,
+    time_seq_ptr = undefined,
     id_tree_state = nil,
     seq_tree_state = nil,
     local_tree_state = nil,
@@ -105,7 +106,8 @@ upgrade(Header) ->
         fun upgrade_disk_version/1,
         fun upgrade_uuid/1,
         fun upgrade_epochs/1,
-        fun upgrade_compacted_seq/1
+        fun upgrade_compacted_seq/1,
+        fun upgrade_time_seq/1
     ],
     lists:foldl(
         fun(F, HdrAcc) ->
@@ -176,6 +178,9 @@ epochs(Header) ->
 compacted_seq(Header) ->
     get_field(Header, compacted_seq).
 
+time_seq_ptr(Header) ->
+    get_field(Header, time_seq_ptr).
+
 purge_infos_limit(Header) ->
     get_field(Header, purge_infos_limit).
 
@@ -204,20 +209,19 @@ upgrade_tuple(Old) when is_record(Old, db_header) ->
     Old;
 upgrade_tuple(Old) when is_tuple(Old) ->
     NewSize = record_info(size, db_header),
-    if
-        tuple_size(Old) < NewSize -> ok;
-        true -> erlang:error({invalid_header_size, Old})
-    end,
-    {_, New} = lists:foldl(
-        fun(Val, {Idx, Hdr}) ->
-            {Idx + 1, setelement(Idx, Hdr, Val)}
+    Upgrade = tuple_size(Old) < NewSize,
+    ProhibitDowngrade = config:get_boolean("couchdb", "prohibit_downgrade", true),
+    OldKVs =
+        case {Upgrade, ProhibitDowngrade} of
+            {true, AnyBool} when is_boolean(AnyBool) -> tuple_to_list(Old);
+            {false, true} -> error({invalid_header_size, Old});
+            {false, false} -> lists:sublist(tuple_to_list(Old), NewSize)
         end,
-        {1, #db_header{}},
-        tuple_to_list(Old)
-    ),
+    FoldFun = fun(Val, {Idx, Hdr}) -> {Idx + 1, setelement(Idx, Hdr, Val)} end,
+    {_, New} = lists:foldl(FoldFun, {1, #db_header{}}, OldKVs),
     if
         is_record(New, db_header) -> ok;
-        true -> erlang:error({invalid_header_extension, {Old, New}})
+        true -> error({invalid_header_extension, {Old, New}})
     end,
     New.
 
@@ -330,6 +334,17 @@ upgrade_compacted_seq(#db_header{} = Header) ->
             Header
     end.
 
+upgrade_time_seq(#db_header{} = Header) ->
+    case Header#db_header.time_seq_ptr of
+        0 ->
+            % This used to be an unused, always set to 0 field before,
+            % on upgrade upgrade it to the default unset time_seq_ptr
+            % value: undefined
+            Header#db_header{time_seq_ptr = undefined};
+        _ ->
+            Header
+    end.
+
 latest(?LATEST_DISK_VERSION) ->
     true;
 latest(N) when is_integer(N), N < ?LATEST_DISK_VERSION ->
@@ -338,7 +353,8 @@ latest(_Else) ->
     undefined.
 
 -ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
+
+-include_lib("couch/include/couch_eunit.hrl").
 
 mk_header(Vsn) ->
     {
@@ -348,8 +364,8 @@ mk_header(Vsn) ->
         Vsn,
         % update_seq
         100,
-        % unused
-        0,
+        % time_seq_ptr
+        boom,
         % id_tree_state
         foo,
         % seq_tree_state
@@ -477,5 +493,70 @@ get_uuid_from_old_header_test() ->
 get_epochs_from_old_header_test() ->
     Vsn5Header = mk_header(5),
     ?assertEqual(undefined, epochs(Vsn5Header)).
+
+upgrade_time_seq_test() ->
+    Header = mk_header(8),
+    % time_seq's field was reused from an old field which was set to 0 so check
+    % that we can upgrade from 0
+    HeaderWith0Unused = setelement(4, Header, 0),
+    Upgrade = upgrade(HeaderWith0Unused),
+    ?assertEqual(undefined, time_seq_ptr(Upgrade)).
+
+tuple_uprade_test_() ->
+    {
+        foreach,
+        fun() ->
+            Ctx = test_util:start_couch(),
+            config:set("couchdb", "prohibit_downgrade", "true", false),
+            Ctx
+        end,
+        fun(Ctx) ->
+            config:delete("couchdb", "prohibit_downgrade", false),
+            test_util:stop_couch(Ctx)
+        end,
+        [
+            ?TDEF_FE(t_upgrade_tuple_same_size),
+            ?TDEF_FE(t_upgrade_tuple),
+            ?TDEF_FE(t_downgrade_default),
+            ?TDEF_FE(t_downgrade_allowed)
+        ]
+    }.
+
+t_upgrade_tuple_same_size(_) ->
+    Hdr = #db_header{disk_version = ?LATEST_DISK_VERSION},
+    Hdr1 = upgrade_tuple(Hdr),
+    ?assertEqual(Hdr, Hdr1).
+
+t_upgrade_tuple(_) ->
+    Hdr = {db_header, ?LATEST_DISK_VERSION, 101},
+    Hdr1 = upgrade_tuple(Hdr),
+    ?assertMatch(
+        #db_header{
+            disk_version = ?LATEST_DISK_VERSION,
+            update_seq = 101,
+            purge_infos_limit = 1000
+        },
+        Hdr1
+    ).
+
+t_downgrade_default(_) ->
+    Junk = lists:duplicate(50, x),
+    Hdr = list_to_tuple([db_header, ?LATEST_DISK_VERSION] ++ Junk),
+    % Not allowed by default
+    ?assertError({invalid_header_size, _}, upgrade_tuple(Hdr)).
+
+t_downgrade_allowed(_) ->
+    Junk = lists:duplicate(50, x),
+    Hdr = list_to_tuple([db_header, ?LATEST_DISK_VERSION, 42] ++ Junk),
+    config:set("couchdb", "prohibit_downgrade", "false", false),
+    Hdr1 = upgrade_tuple(Hdr),
+    ?assert(is_record(Hdr1, db_header)),
+    ?assertMatch(
+        #db_header{
+            disk_version = ?LATEST_DISK_VERSION,
+            update_seq = 42
+        },
+        Hdr1
+    ).
 
 -endif.

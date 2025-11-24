@@ -111,6 +111,23 @@ ddoc(red) ->
                 ]}}
         ]}
     );
+ddoc(list) ->
+    couch_doc:from_json_obj(
+        map_to_proplist(#{
+            <<"_id">> => <<"_design/lists">>,
+            <<"lists">> => #{
+                <<"list">> =>
+                    <<
+                        "function(head, req){\n"
+                        "               send(\"H\");\n"
+                        "               var row;\n"
+                        "               while(row = getRow()) {send(row.key);}\n"
+                        "               return \"T\";\n"
+                        "           }"
+                    >>
+            }
+        })
+    );
 ddoc(Id) ->
     couch_doc:from_json_obj(
         {[
@@ -122,7 +139,7 @@ ddoc(Id) ->
 doc(Id) ->
     couch_doc:from_json_obj(
         {[
-            {<<"_id">>, list_to_binary(integer_to_list(Id))},
+            {<<"_id">>, integer_to_binary(Id)},
             {<<"val">>, Id}
         ]}
     ).
@@ -134,3 +151,6 @@ local_doc(Id) ->
             {<<"val">>, Id}
         ]}
     ).
+
+map_to_proplist(#{} = Map) ->
+    jiffy:decode(jiffy:encode(Map)).

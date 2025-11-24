@@ -280,7 +280,7 @@ and well handled:
 
     .. code-block:: http
 
-        HTTP/1.1 500 Internal Server Error
+        HTTP/1.1 401 Unauthorized
         Cache-Control: must-revalidate
         Content-Length: 108
         Content-Type: application/json
@@ -638,7 +638,7 @@ The Replication Log SHOULD contain the following fields:
 - **source_last_seq** (*number*): Last processed Checkpoint. Shortcut to
   the ``recorded_seq`` field of the latest ``history`` object. **Required**
 
-This request MAY fall with a :statuscode:`404` response:
+This request MAY fail with a :statuscode:`404` response:
 
     **Request**:
 

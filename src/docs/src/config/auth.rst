@@ -390,12 +390,14 @@ Authentication Configuration
     .. config:option:: upgrade_hash_on_auth :: Auto-upgrade user auth docs on next auth call
 
         .. versionadded:: 3.4
+        .. versionchanged:: 3.5
 
-        Upgrade user auth docs during the next successful
-        authentication using the current password hashing settings. ::
+        Upgrade user auth docs during the next successful authentication using
+        the current password hashing settings. The default was changed from
+        ``false`` to ``true`` in version ``3.5.0``::
 
             [chttpd_auth]
-            upgrade_hash_on_auth = false
+            upgrade_hash_on_auth = true
 
 .. config:section:: jwt_auth :: JWT Authentication
 
@@ -564,13 +566,13 @@ Authentication Configuration
 
     .. config:option:: mode :: lockout mode
 
-        When set to ``off`` (the default), CouchDB will not track repeated
+        When set to ``off``, CouchDB will not track repeated
         authentication failures.
 
         When set to ``warn``, CouchDB will log a warning when repeated
         authentication failures occur for a specific user and client IP address.
 
-        When set to ``enforce``, CouchDB will will reject requests with a
+        When set to ``enforce`` (the default), CouchDB will reject requests with a
         403 status code if repeated authentication failures occur for a
         specific user and client IP address. ::
 

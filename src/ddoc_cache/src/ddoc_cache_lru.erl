@@ -77,7 +77,7 @@ refresh(DbName, DDocIds) ->
     gen_server:cast(?MODULE, {refresh, DbName, DDocIds}).
 
 init(_) ->
-    couch_util:set_mqd_off_heap(?MODULE),
+    erlang:process_flag(message_queue_data, off_heap),
     process_flag(trap_exit, true),
     BaseOpts = [public, named_table],
     CacheOpts =
@@ -273,7 +273,7 @@ remove_key(#{} = Dbs, Key) ->
     end.
 
 unlink_and_flush(Pid) ->
-    erlang:unlink(Pid),
+    unlink(Pid),
     % Its possible that the entry process has already exited before
     % we unlink it so we have to flush out a possible 'EXIT'
     % message sitting in our message queue. Notice that we're

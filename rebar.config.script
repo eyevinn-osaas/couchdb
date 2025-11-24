@@ -150,25 +150,28 @@ SubDirs = [
     "rel"
 ].
 
+% Try to keep deps in sync with .elp.toml deps
+
 DepDescs = [
 %% Independent Apps
 {snappy,           "snappy",           {tag, "CouchDB-1.0.9"}},
 
 %% %% Non-Erlang deps
 {fauxton,          {url, "https://github.com/apache/couchdb-fauxton"},
-                   {tag, "v1.3.1"}, [raw]},
+                   {tag, "v1.3.5"}, [raw]},
 {ibrowse,          "ibrowse",          {tag, "CouchDB-4.4.2-6"}},
+{gun,              "gun",              {tag, "2.2.0-couchdb"}},
 {jiffy,            "jiffy",            {tag, "1.1.2"}},
-{mochiweb,         "mochiweb",         {tag, "v3.2.2"}},
-{meck,             "meck",             {tag, "CouchDB-0.9.2-1"}},
-{recon,            "recon",            {tag, "2.5.5"}}
+{mochiweb,         "mochiweb",         {tag, "v3.3.0"}},
+{meck,             "meck",             {tag, "v1.1.0"}},
+{recon,            "recon",            {tag, "2.5.6"}}
 ].
 
 WithProper = lists:keyfind(with_proper, 1, CouchConfig) == {with_proper, true}.
 
 OptionalDeps = case WithProper of
     true ->
-        [{proper, {url, "https://github.com/proper-testing/proper"}, "a5ae5669f01143b0828fc21667d4f5e344aa760b"}];
+        [{proper, {url, "https://github.com/proper-testing/proper"}, "v1.5.0"}];
     false ->
         []
 end.
@@ -191,7 +194,7 @@ end.
 AddConfig = [
     {cover_enabled, true},
     {cover_print_enabled, true},
-    {require_otp_vsn, "25|26|27"},
+    {require_otp_vsn, "26|27|28"},
     {deps_dir, "src"},
     {deps, lists:map(MakeDep, DepDescs ++ OptionalDeps)},
     {sub_dirs, SubDirs},

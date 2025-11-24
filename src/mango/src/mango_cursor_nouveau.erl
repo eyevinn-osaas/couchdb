@@ -18,8 +18,6 @@
     execute/3
 ]).
 
--include_lib("couch/include/couch_db.hrl").
--include_lib("nouveau/include/nouveau.hrl").
 -include("mango_cursor.hrl").
 -include("mango.hrl").
 
@@ -49,7 +47,7 @@ create(Db, {Indexes, Trace}, Selector, Opts) ->
         end,
 
     NouveauLimit = get_nouveau_limit(),
-    Limit = erlang:min(NouveauLimit, couch_util:get_value(limit, Opts, mango_opts:default_limit())),
+    Limit = min(NouveauLimit, couch_util:get_value(limit, Opts, mango_opts:default_limit())),
     Skip = couch_util:get_value(skip, Opts, 0),
     Fields = couch_util:get_value(fields, Opts, all_fields),
 
@@ -108,7 +106,7 @@ execute(Cursor, UserFun, UserAcc) ->
         user_acc = UserAcc,
         fields = Cursor#cursor.fields,
         execution_stats = mango_execution_stats:log_start(Stats),
-        documents_seen = sets:new([{version, 2}])
+        documents_seen = couch_util:new_set()
     },
     try
         case Query of
@@ -297,7 +295,7 @@ update_query_args(CAcc) ->
     }.
 
 get_limit(CAcc) ->
-    erlang:min(get_nouveau_limit(), CAcc#cacc.limit + CAcc#cacc.skip).
+    min(get_nouveau_limit(), CAcc#cacc.limit + CAcc#cacc.skip).
 
 get_nouveau_limit() ->
     config:get_integer("nouveau", "max_limit", 200).

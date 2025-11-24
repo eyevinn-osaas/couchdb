@@ -37,12 +37,11 @@ go(DbName, Id, Revs, Options) ->
         open_revs,
         [Id, Revs, Options]
     ),
-    R = couch_util:get_value(r, Options, integer_to_list(mem3:quorum(DbName))),
     State = #state{
         dbname = DbName,
         worker_count = length(Workers),
         workers = Workers,
-        r = list_to_integer(R),
+        r = fabric_util:r_from_opts(DbName, Options),
         revs = Revs,
         latest = lists:member(latest, Options),
         replies = []
@@ -213,7 +212,7 @@ maybe_read_repair(Db, IsTree, Replies, NodeRevs, ReplyCount, DoRepair) ->
         [] ->
             ok;
         _ ->
-            erlang:spawn(fun() -> read_repair(Db, Docs, NodeRevs) end)
+            spawn(fun() -> read_repair(Db, Docs, NodeRevs) end)
     end.
 
 tree_repair_docs(_Replies, false) ->
@@ -456,9 +455,9 @@ check_finish_quorum_newer(_) ->
     S0 = state0(all, false),
     {ok, S1} = handle_message({ok, [foo1(), bar1()]}, W1, S0),
     Expect = {stop, [bar1(), foo2()]},
-    ok = meck:reset(fabric),
+    meck:reset(fabric),
     ?assertEqual(Expect, handle_message({ok, [foo2(), bar1()]}, W2, S1)),
-    ok = meck:wait(fabric, update_docs, '_', 5000),
+    meck:wait(fabric, update_docs, '_', 5000),
     ?assertMatch(
         [{_, {fabric, update_docs, [_, _, _]}, _}],
         meck:history(fabric)
@@ -474,7 +473,7 @@ check_finish_quorum_replicator(_) ->
     S1 = S0#state{dbname = <<"foo/_replicator">>},
     {ok, S2} = handle_message({ok, [foo1(), bar1()]}, W1, S1),
     Expect = {stop, [bar1(), foo2()]},
-    ok = meck:reset(fabric),
+    meck:reset(fabric),
     ?assertEqual(Expect, handle_message({ok, [foo2(), bar1()]}, W2, S2)),
     timer:sleep(100),
     ?assertNot(meck:called(fabric, update_docs, ['_', '_', '_'])).

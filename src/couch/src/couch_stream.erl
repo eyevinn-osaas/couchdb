@@ -35,8 +35,6 @@
     handle_info/2
 ]).
 
--include_lib("couch/include/couch_db.hrl").
-
 -define(DEFAULT_BUFFER_SIZE, 4096).
 
 -record(stream, {
@@ -185,7 +183,7 @@ init({Engine, OpenerPid, OpenerPriority, Options}) ->
         end,
     {ok, #stream{
         engine = Engine,
-        opener_monitor = erlang:monitor(process, OpenerPid),
+        opener_monitor = monitor(process, OpenerPid),
         md5 = couch_hash:md5_hash_init(),
         identity_md5 = couch_hash:md5_hash_init(),
         encoding_fun = EncodingFun,
@@ -269,7 +267,7 @@ handle_call(close, _From, Stream) ->
                 StreamLen = WrittenLen + iolist_size(WriteBin2),
                 {do_finalize(NewEngine), StreamLen, IdenLen, Md5Final, IdenMd5Final}
         end,
-    erlang:demonitor(MonRef),
+    demonitor(MonRef),
     {stop, normal, Result, Stream}.
 
 handle_cast(_Msg, State) ->

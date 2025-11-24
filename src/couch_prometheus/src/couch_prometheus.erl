@@ -67,7 +67,9 @@ get_system_stats() ->
         get_ets_stats(),
         get_internal_replication_jobs_stat(),
         get_membership_stat(),
-        get_distribution_stats()
+        get_membership_nodes(),
+        get_distribution_stats(),
+        get_bt_engine_cache_stats()
     ]).
 
 get_uptime_stat() ->
@@ -98,6 +100,19 @@ get_membership_stat() ->
     ],
     to_prom(membership, gauge, "count of nodes in the cluster", Labels).
 
+get_membership_nodes() ->
+    Self = config:node_name(),
+    Expected = mem3:nodes() -- [Self],
+    Nodes = nodes(),
+    Disconnected = Expected -- Nodes,
+    % Extra nodes, connected but not part of mem3
+    Extra = Nodes -- Expected,
+    Connected = Nodes -- Extra,
+    ConnectedLabels = [{[{node, N}], 1} || N <- lists:sort(Connected)],
+    DisconnectedLables = [{[{node, N}], 0} || N <- lists:sort(Disconnected)],
+    Labels = ConnectedLabels ++ DisconnectedLables,
+    to_prom(membership_nodes, gauge, "cluster node connectivity", Labels).
+
 get_vm_stats() ->
     MemLabels = lists:map(
         fun({Type, Value}) ->
@@ -105,9 +120,9 @@ get_vm_stats() ->
         end,
         erlang:memory()
     ),
-    {NumGCs, WordsReclaimed, _} = erlang:statistics(garbage_collection),
-    CtxSwitches = element(1, erlang:statistics(context_switches)),
-    Reds = element(1, erlang:statistics(reductions)),
+    {NumGCs, WordsReclaimed, _} = statistics(garbage_collection),
+    CtxSwitches = element(1, statistics(context_switches)),
+    Reds = element(1, statistics(reductions)),
     ProcCount = erlang:system_info(process_count),
     ProcLimit = erlang:system_info(process_limit),
     [
@@ -143,7 +158,7 @@ get_vm_stats() ->
     ].
 
 get_io_stats() ->
-    {{input, In}, {output, Out}} = erlang:statistics(io),
+    {{input, In}, {output, Out}} = statistics(io),
     [
         to_prom(
             erlang_io_recv_bytes_total,
@@ -360,3 +375,12 @@ get_distribution_stats() ->
 get_ets_stats() ->
     NumTabs = length(ets:all()),
     to_prom(erlang_ets_table, gauge, "number of ETS tables", NumTabs).
+
+get_bt_engine_cache_stats() ->
+    Stats = couch_bt_engine_cache:info(),
+    Size = maps:get(size, Stats, 0),
+    Mem = maps:get(memory, Stats, 0),
+    [
+        to_prom(couchdb_bt_engine_cache_memory, gauge, "memory used by the btree cache", Mem),
+        to_prom(couchdb_bt_engine_cache_size, gauge, "number of entries in the btree cache", Size)
+    ].

@@ -48,6 +48,8 @@
     :code 202: Request was accepted, and was completed successfully on at least
                one replica, but quorum was not reached.
     :code 400: Invalid database name or JSON payload
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 415: Bad :header:`Content-Type` value
     :code 500: Internal server error or timeout
 
@@ -129,6 +131,9 @@ As a result of this purge operation, a new updated version of the document will
 be available in ``_all_docs`` and ``_changes``, creating a new record in ``_changes``.
 The database's ``purge_seq`` and ``update_seq`` will be increased.
 
+.. note::
+    The _purge endpoint is restricted to admin users (since version 2.3.1)
+
 Internal Replication
 ======================
 Purges are automatically replicated between replicas of the same database. Each
@@ -193,6 +198,8 @@ following behavior:
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
     :code 400: Invalid database name
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -244,6 +251,8 @@ following behavior:
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -294,6 +303,8 @@ following behavior:
     :>json boolean ok: Operation status
     :code 200: Request completed successfully
     :code 400: Invalid JSON data
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -316,6 +327,96 @@ following behavior:
         Content-Length: 12
         Content-Type: application/json
         Date: Wed, 14 Jun 2017 14:45:34 GMT
+        Server: CouchDB (Erlang/OTP)
+
+        {
+            "ok": true
+        }
+
+.. _api/db/auto_purge:
+
+=====================
+``/{db}/_auto_purge``
+=====================
+
+.. http:get:: /{db}/_auto_purge
+    :synopsis: Retrieves auto purge settings
+
+    Retrieves the auto purge settings for the database. These settings
+    are used by the :ref:`auto purge plugin <config/auto_purge_plugin>`.
+
+    :param db: Database name
+    :<header Accept: - :mimetype:`application/json`
+                     - :mimetype:`text/plain`
+    :<header Content-Type: :mimetype:`application/json`
+    :<json object: auto purge settings
+    :>header Content-Type: - :mimetype:`application/json`
+                           - :mimetype:`text/plain; charset=utf-8`
+    :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
+    :code 500: Internal server error or timeout
+
+    **Request**:
+
+    .. code-block:: http
+
+        GET /db/_auto_purge HTTP/1.1
+        Accept: application/json
+        Host: localhost:5984
+
+    **Response**:
+
+    .. code-block:: http
+
+        HTTP/1.1 200 OK
+        Cache-Control: must-revalidate
+        Content-Length: 5
+        Content-Type: application/json
+        Date: Mon, 22 Sep 2025 11:01:00 GMT
+        Server: CouchDB (Erlang/OTP)
+
+        {"deleted_document_ttl": "3_mon"}
+
+.. http:put:: /{db}/_auto_purge
+    :synopsis: Update auto purge settings
+
+    Updates the auto purge settings for the database. These settings
+    are used by the :ref:`auto purge plugin <config/auto_purge_plugin>`.
+
+    :param db: Database name
+    :<header Accept: - :mimetype:`application/json`
+                     - :mimetype:`text/plain`
+    :<header Content-Type: :mimetype:`application/json`
+    :<json object: auto purge settings
+    :>header Content-Type: - :mimetype:`application/json`
+                           - :mimetype:`text/plain; charset=utf-8`
+    :code 201: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
+    :code 500: Internal server error or timeout
+
+    **Request**:
+
+    .. code-block:: http
+
+        PUT /db/_auto_purge HTTP/1.1
+        Accept: application/json
+        Content-Length: 5
+        Content-Type: application/json
+        Host: localhost:5984
+
+        {"deleted_document_ttl": "3_hour"}
+
+    **Response**:
+
+    .. code-block:: http
+
+        HTTP/1.1 202 Accepted
+        Cache-Control: must-revalidate
+        Content-Length: 12
+        Content-Type: application/json
+        Date: Mon, 22 Sep 2025 11:01:00 GMT
         Server: CouchDB (Erlang/OTP)
 
         {
@@ -346,6 +447,8 @@ following behavior:
       revisions
     :code 200: Request completed successfully
     :code 400: Invalid database name or JSON payload
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -425,6 +528,8 @@ following behavior:
       for specified document and its current revision in requested database
     :code 200: Request completed successfully
     :code 400: Invalid database name or JSON payload
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -485,6 +590,8 @@ following behavior:
     :>header Content-Type: - :mimetype:`application/json`
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -525,6 +632,8 @@ following behavior:
     :>json boolean ok: Operation status
     :code 200: Request completed successfully
     :code 400: Invalid JSON data
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -548,6 +657,117 @@ following behavior:
         Content-Type: application/json
         Date: Mon, 12 Aug 2013 17:47:52 GMT
         Server: CouchDB (Erlang/OTP)
+
+        {
+            "ok": true
+        }
+
+.. _api/db/time_seq:
+
+=====================
+``/{db}/_time_seq``
+=====================
+
+.. http:get:: /{db}/_time_seq
+    :synopsis: Get the time-seq data structure summaries
+
+    Time-seq is a data structure which keeps track of how db sequences map to
+    rough time intervals. Each summary contains all the interval start times
+    and the number of sequences in that time interval.
+
+    :param db: Database name
+    :<header Accept: - :mimetype:`application/json`
+                     - :mimetype:`text/plain`
+    :>header Content-Type: - :mimetype:`application/json`
+                           - :mimetype:`text/plain; charset=utf-8`
+    :>json object time_seq: A time_seq summaries broken down by range and node.
+    :code 200: Request completed successfully
+    :code 400: Invalid database name
+    :code 401: Read privilege required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
+    :code 415: Bad :header:`Content-Type` value
+    :code 500: Internal server error or timeout
+
+    **Request**:
+
+    .. code-block:: http
+
+        GET /db/_time_seq HTTP/1.1
+        Accept: application/json
+        Host: localhost:5984
+
+    **Response**:
+
+    .. code-block:: http
+
+        HTTP/1.1 200 OK
+        Cache-Control: must-revalidate
+        Content-Length: 400
+        Content-Type: application/json
+
+        {
+            "time_seq": {
+                "00000000-7fffffff": {
+                    "node1@127.0.0.1": [
+                        ["2025-07-27T06:00:00Z", 8],
+                        ["2025-07-27T09:00:00Z", 13],
+                        ["2025-07-27T12:00:00Z", 13],
+                        ["2025-07-27T15:00:00Z", 7],
+                        ["2025-07-27T18:00:00Z", 3]
+                    ]
+                },
+                "80000000-ffffffff": {
+                    "node1@127.0.0.1": [
+                        ["2025-07-27T03:00:00Z", 1],
+                        ["2025-07-27T06:00:00Z", 10],
+                        ["2025-07-27T09:00:00Z", 5],
+                        ["2025-07-27T12:00:00Z", 5],
+                        ["2025-07-27T15:00:00Z", 11],
+                        ["2025-07-27T18:00:00Z", 2]
+                    ]
+                }
+            }
+        }
+
+.. http:delete:: /{db}/_time_seq
+    :synopsis: Reset time-seq data structures.
+
+    Time-seq is a data structure which keeps track of how db sequences map to
+    rough time intervals. The ``DELETE`` method will reset time-seq data
+    structure for all the shards in the database. Resetting the time-seq
+    structure is always safe and doesn't alter the main b-trees, document
+    revisions, or document bodies. It just resets the time to database
+    sequences mappings. This should be rarely needed and is mainly to be used
+    perhaps in the case when the OS time settings were misconfigured and the
+    the time-seq data structures recorded invalid dates from a distant future.
+
+    :param db: Database name
+    :<header Accept: - :mimetype:`application/json`
+                     - :mimetype:`text/plain`
+    :<header Content-Type: :mimetype:`application/json`
+    :>header Content-Type: - :mimetype:`application/json`
+                           - :mimetype:`text/plain; charset=utf-8`
+    :>json boolean ok: Operation status
+    :code 200: Request completed successfully
+    :code 400: Invalid JSON data
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
+
+    **Request**:
+
+    .. code-block:: http
+
+        DELETE /db/_time_seq HTTP/1.1
+        Content-Length: 0
+        Host: localhost:15984
+
+    **Response**:
+
+    .. code-block:: http
+
+        HTTP/1.1 200 OK
+        Content-Length: 12
+        Content-Type: application/json
 
         {
             "ok": true

@@ -22,24 +22,15 @@
     maybe_noop_range/2
 ]).
 
--include_lib("couch/include/couch_db.hrl").
 -include("mango.hrl").
 -include("mango_cursor.hrl").
 
--ifdef(HAVE_DREYFUS).
 -define(CURSOR_MODULES, [
     mango_cursor_view,
     mango_cursor_text,
     mango_cursor_nouveau,
     mango_cursor_special
 ]).
--else.
--define(CURSOR_MODULES, [
-    mango_cursor_view,
-    mango_cursor_nouveau,
-    mango_cursor_special
-]).
--endif.
 
 -define(SUPERVISOR, mango_cursor_sup).
 
@@ -287,16 +278,16 @@ extract_selector_hints(Selector) ->
     Modules = lists:flatmap(AsIndex, ?CURSOR_MODULES),
     Populate =
         fun({Module, IndexType}) ->
-            AllFields = sets:from_list(mango_selector:fields(Selector)),
+            AllFields = couch_util:set_from_list(mango_selector:fields(Selector)),
             Normalize = fun(N) -> hd(string:split(N, ":")) end,
-            IndexableFields = sets:from_list(
+            IndexableFields = couch_util:set_from_list(
                 lists:map(Normalize, Module:indexable_fields(Selector))
             ),
             UnindexableFields = sets:subtract(AllFields, IndexableFields),
             {[
                 {type, IndexType},
-                {indexable_fields, sets:to_list(IndexableFields)},
-                {unindexable_fields, sets:to_list(UnindexableFields)}
+                {indexable_fields, lists:sort(sets:to_list(IndexableFields))},
+                {unindexable_fields, lists:sort(sets:to_list(UnindexableFields))}
             ]}
         end,
     lists:map(Populate, Modules).
@@ -441,7 +432,10 @@ maybe_add_warning(UserFun, #cursor{index = Index, opts = Opts}, Stats, UserAcc) 
 
 % create a dummy cursor in absence of usable indexes, utilized by _explain
 create_cursor(Db, {[], Trace0}, Selector, Opts) ->
-    Blank = #{filtered_indexes => sets:new(), indexes_of_type => sets:new()},
+    Blank = #{
+        filtered_indexes => couch_util:new_set(),
+        indexes_of_type => couch_util:new_set()
+    },
     Trace = maps:merge(Trace0, Blank),
     Limit = couch_util:get_value(limit, Opts, mango_opts:default_limit()),
     Skip = couch_util:get_value(skip, Opts, 0),
@@ -461,9 +455,9 @@ create_cursor(Db, {[], Trace0}, Selector, Opts) ->
         execution_stats = Stats
     }};
 create_cursor(Db, {Indexes, Trace0}, Selector, Opts) ->
-    Trace1 = maps:merge(Trace0, #{filtered_indexes => sets:from_list(Indexes)}),
+    Trace1 = maps:merge(Trace0, #{filtered_indexes => couch_util:set_from_list(Indexes)}),
     [{CursorMod, CursorModIndexes} | _] = group_indexes_by_type(Indexes),
-    Trace = maps:merge(Trace1, #{indexes_of_type => sets:from_list(CursorModIndexes)}),
+    Trace = maps:merge(Trace1, #{indexes_of_type => couch_util:set_from_list(CursorModIndexes)}),
     CursorMod:create(Db, {CursorModIndexes, Trace}, Selector, Opts).
 
 group_indexes_by_type(Indexes) ->
@@ -613,8 +607,8 @@ t_create_regular(_) ->
     Trace1 = #{},
     Trace2 =
         #{
-            filtered_indexes => sets:from_list(FilteredIndexes),
-            indexes_of_type => sets:from_list(IndexesOfType)
+            filtered_indexes => couch_util:set_from_list(FilteredIndexes),
+            indexes_of_type => couch_util:set_from_list(IndexesOfType)
         },
     Options = [{use_index, []}, {allow_fallback, true}],
     meck:expect(mango_selector, normalize, [selector], meck:val(normalized_selector)),
@@ -643,8 +637,8 @@ t_create_user_specified_index(_) ->
     Trace1 = #{},
     Trace2 =
         #{
-            filtered_indexes => sets:from_list(FilteredIndexes),
-            indexes_of_type => sets:from_list(IndexesOfType)
+            filtered_indexes => couch_util:set_from_list(FilteredIndexes),
+            indexes_of_type => couch_util:set_from_list(IndexesOfType)
         },
     Options = [{use_index, [<<"_design/view_idx2">>]}],
     meck:expect(mango_selector, normalize, [selector], meck:val(normalized_selector)),
@@ -672,8 +666,8 @@ t_create_invalid_user_specified_index(_) ->
     Trace1 = #{},
     Trace2 =
         #{
-            filtered_indexes => sets:from_list(UsableIndexes),
-            indexes_of_type => sets:from_list(IndexesOfType)
+            filtered_indexes => couch_util:set_from_list(UsableIndexes),
+            indexes_of_type => couch_util:set_from_list(IndexesOfType)
         },
     Options = [{use_index, [<<"foobar">>]}, {allow_fallback, true}],
     meck:expect(mango_selector, normalize, [selector], meck:val(normalized_selector)),
@@ -701,8 +695,8 @@ t_create_invalid_user_specified_index_no_fallback(_) ->
     Trace1 = #{},
     Trace2 =
         #{
-            filtered_indexes => sets:from_list(UsableIndexes),
-            indexes_of_type => sets:from_list(IndexesOfType)
+            filtered_indexes => couch_util:set_from_list(UsableIndexes),
+            indexes_of_type => couch_util:set_from_list(IndexesOfType)
         },
     UseIndex = [<<"design">>, <<"foobar">>],
     Options = [{use_index, UseIndex}, {allow_fallback, false}],
@@ -729,8 +723,8 @@ t_create_no_suitable_index_no_fallback(_) ->
     Trace1 = #{},
     Trace2 =
         #{
-            filtered_indexes => sets:from_list(UsableIndexes),
-            indexes_of_type => sets:from_list(IndexesOfType)
+            filtered_indexes => couch_util:set_from_list(UsableIndexes),
+            indexes_of_type => couch_util:set_from_list(IndexesOfType)
         },
     Options = [{use_index, []}, {allow_fallback, false}],
     meck:expect(mango_selector, normalize, [selector], meck:val(normalized_selector)),
@@ -777,7 +771,7 @@ extract_candidate_indexes_test_() ->
     }.
 
 t_extract_candidate_indexes_empty(_) ->
-    Indexes = sets:new(),
+    Indexes = couch_util:new_set(),
     UsabilityMap = [],
     Trace =
         #{
@@ -799,7 +793,7 @@ t_extract_candidate_indexes_empty(_) ->
     ?assertEqual(Candidates, extract_candidate_indexes(Cursor)).
 
 t_extract_candidate_indexes_singleton(_) ->
-    Indexes = sets:from_list([winner]),
+    Indexes = couch_util:set_from_list([winner]),
     UsabilityMap = [{winner, {true, #{reason => []}}}],
     Trace =
         #{
@@ -835,15 +829,17 @@ t_extract_candidate_indexes_user_specified(_) ->
         ],
     Trace =
         #{
-            all_indexes => sets:from_list([
+            all_indexes => couch_util:set_from_list([
                 winner, Partial, Partitioned, NotUsable, Filtered, Unfavored
             ]),
-            global_indexes => sets:from_list([winner, Partitioned, NotUsable, Filtered, Unfavored]),
-            partition_indexes => sets:from_list([winner, NotUsable, Filtered, Unfavored]),
-            usable_indexes => sets:from_list([winner, Filtered, Unfavored]),
+            global_indexes => couch_util:set_from_list([
+                winner, Partitioned, NotUsable, Filtered, Unfavored
+            ]),
+            partition_indexes => couch_util:set_from_list([winner, NotUsable, Filtered, Unfavored]),
+            usable_indexes => couch_util:set_from_list([winner, Filtered, Unfavored]),
             usability_map => UsabilityMap,
-            filtered_indexes => sets:from_list([winner, Unfavored]),
-            indexes_of_type => sets:from_list([winner])
+            filtered_indexes => couch_util:set_from_list([winner, Unfavored]),
+            indexes_of_type => couch_util:set_from_list([winner])
         },
     Cursor =
         #cursor{
@@ -935,7 +931,7 @@ t_extract_candidate_indexes_regular(_) ->
     ],
     Trace =
         #{
-            all_indexes => sets:from_list([
+            all_indexes => couch_util:set_from_list([
                 winner,
                 Partial1,
                 Partial2,
@@ -948,7 +944,7 @@ t_extract_candidate_indexes_regular(_) ->
                 Usable2,
                 Usable3
             ]),
-            global_indexes => sets:from_list([
+            global_indexes => couch_util:set_from_list([
                 winner,
                 Partitioned1,
                 Partitioned2,
@@ -959,17 +955,17 @@ t_extract_candidate_indexes_regular(_) ->
                 Usable2,
                 Usable3
             ]),
-            partition_indexes => sets:from_list([
+            partition_indexes => couch_util:set_from_list([
                 winner, NotUsable, Unfavored1, Unfavored2, Usable1, Usable2, Usable3
             ]),
-            usable_indexes => sets:from_list([
+            usable_indexes => couch_util:set_from_list([
                 winner, Unfavored1, Unfavored2, Usable1, Usable2, Usable3
             ]),
             usability_map => UsabilityMap,
-            filtered_indexes => sets:from_list([
+            filtered_indexes => couch_util:set_from_list([
                 winner, Unfavored1, Unfavored2, Usable1, Usable2, Usable3
             ]),
-            indexes_of_type => sets:from_list([winner, Usable1, Usable2, Usable3]),
+            indexes_of_type => couch_util:set_from_list([winner, Usable1, Usable2, Usable3]),
             sorted_index_ranges => SortedIndexRanges
         },
     Cursor =
@@ -1123,7 +1119,7 @@ t_extract_selector_hints_view(_) ->
             {[
                 {type, json},
                 {indexable_fields, ["field2"]},
-                {unindexable_fields, ["field3", "field1"]}
+                {unindexable_fields, ["field1", "field3"]}
             ]}
         ],
     ?assertEqual(Hints, extract_selector_hints(selector)).
@@ -1139,12 +1135,12 @@ t_extract_selector_hints_text(_) ->
             {[
                 {type, json},
                 {indexable_fields, ["field2"]},
-                {unindexable_fields, ["field3", "field1"]}
+                {unindexable_fields, ["field1", "field3"]}
             ]},
             {[
                 {type, text},
                 {indexable_fields, ["field1"]},
-                {unindexable_fields, ["field3", "field2"]}
+                {unindexable_fields, ["field2", "field3"]}
             ]}
         ],
     ?assertEqual(Hints, extract_selector_hints(selector)).
@@ -1160,12 +1156,12 @@ t_extract_selector_hints_nouveau(_) ->
             {[
                 {type, json},
                 {indexable_fields, ["field2"]},
-                {unindexable_fields, ["field3", "field1"]}
+                {unindexable_fields, ["field1", "field3"]}
             ]},
             {[
                 {type, nouveau},
                 {indexable_fields, ["field1"]},
-                {unindexable_fields, ["field3", "field2"]}
+                {unindexable_fields, ["field2", "field3"]}
             ]}
         ],
     ?assertEqual(Hints, extract_selector_hints(selector)).
@@ -1188,7 +1184,7 @@ explain_test_() ->
 
 t_explain_empty(_) ->
     Selector = {[]},
-    Indexes = sets:new(),
+    Indexes = couch_util:new_set(),
     Trace =
         #{
             all_indexes => Indexes,
@@ -1236,7 +1232,7 @@ t_explain_regular(_) ->
         type = <<"special">>, name = index, def = all_docs, dbname = db, partitioned = partitioned
     },
     Selector = {[]},
-    Indexes = sets:from_list([Index]),
+    Indexes = couch_util:set_from_list([Index]),
     Fields = some_fields,
     Trace =
         #{

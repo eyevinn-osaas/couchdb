@@ -19,7 +19,6 @@
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_db_int.hrl").
 
--define(IDLE_LIMIT_DEFAULT, 61000).
 % 10 GiB
 -define(DEFAULT_MAX_PARTITION_SIZE, 16#280000000).
 
@@ -34,7 +33,6 @@
 
 init({Engine, DbName, FilePath, Options0}) ->
     erlang:put(io_priority, {db_update, DbName}),
-    update_idle_limit_from_config(),
     DefaultSecObj = default_security_object(DbName),
     Options = [{default_security_object, DefaultSecObj} | Options0],
     try
@@ -51,7 +49,7 @@ init({Engine, DbName, FilePath, Options0}) ->
         % couch_db:validate_doc_update, which loads them lazily.
         NewDb = Db#db{main_pid = self()},
         proc_lib:init_ack({ok, NewDb}),
-        gen_server:enter_loop(?MODULE, [], NewDb, idle_limit())
+        gen_server:enter_loop(?MODULE, [], NewDb)
     catch
         throw:InitError ->
             proc_lib:init_ack(InitError)
@@ -63,39 +61,50 @@ terminate(Reason, Db) ->
     ok.
 
 handle_call(get_db, _From, Db) ->
-    {reply, {ok, Db}, Db, idle_limit()};
+    {reply, {ok, Db}, Db};
 handle_call(start_compact, _From, Db) ->
-    {noreply, NewDb, _Timeout} = handle_cast(start_compact, Db),
-    {reply, {ok, NewDb#db.compactor_pid}, NewDb, idle_limit()};
+    {noreply, NewDb} = handle_cast(start_compact, Db),
+    {reply, {ok, NewDb#db.compactor_pid}, NewDb};
 handle_call(compactor_pid, _From, #db{compactor_pid = Pid} = Db) ->
-    {reply, Pid, Db, idle_limit()};
+    {reply, Pid, Db};
 handle_call(cancel_compact, _From, #db{compactor_pid = nil} = Db) ->
-    {reply, ok, Db, idle_limit()};
+    {reply, ok, Db};
 handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
     unlink(Pid),
     exit(Pid, kill),
     couch_server:delete_compaction_files(Db#db.name),
     Db2 = Db#db{compactor_pid = nil},
     ok = couch_server:db_updated(Db2),
-    {reply, ok, Db2, idle_limit()};
+    {reply, ok, Db2};
 handle_call({set_security, NewSec}, _From, #db{} = Db) ->
     {ok, NewDb} = couch_db_engine:set_security(Db, NewSec),
     NewSecDb = commit_data(NewDb#db{
         security = NewSec
     }),
     ok = couch_server:db_updated(NewSecDb),
-    {reply, ok, NewSecDb, idle_limit()};
+    {reply, ok, NewSecDb};
 handle_call({set_revs_limit, Limit}, _From, Db) ->
     {ok, Db2} = couch_db_engine:set_revs_limit(Db, Limit),
     Db3 = commit_data(Db2),
     ok = couch_server:db_updated(Db3),
-    {reply, ok, Db3, idle_limit()};
+    {reply, ok, Db3};
 handle_call({set_purge_infos_limit, Limit}, _From, Db) ->
     {ok, Db2} = couch_db_engine:set_purge_infos_limit(Db, Limit),
     ok = couch_server:db_updated(Db2),
-    {reply, ok, Db2, idle_limit()};
+    {reply, ok, Db2};
+handle_call({set_time_seq, TSeq}, _From, Db) ->
+    {ok, Db1} = couch_db_engine:set_time_seq(Db, TSeq),
+    {ok, Db2} = couch_db_engine:commit_data(Db1#db{time_seq = TSeq}),
+    ok = couch_server:db_updated(Db2),
+    {reply, ok, Db2};
+handle_call({set_props, Props}, _From, Db) ->
+    {ok, Db1} = couch_db_engine:set_props(Db, Props),
+    Db2 = options_set_props(Db1, Props),
+    {ok, Db3} = couch_db_engine:commit_data(Db2),
+    ok = couch_server:db_updated(Db3),
+    {reply, ok, Db3};
 handle_call({purge_docs, [], _}, _From, Db) ->
-    {reply, {ok, []}, Db, idle_limit()};
+    {reply, {ok, []}, Db};
 handle_call({purge_docs, PurgeReqs0, Options}, _From, Db) ->
     % Filter out any previously applied updates during
     % internal replication
@@ -116,11 +125,11 @@ handle_call({purge_docs, PurgeReqs0, Options}, _From, Db) ->
                 )
         end,
     {ok, NewDb, Replies} = purge_docs(Db, PurgeReqs),
-    {reply, {ok, Replies}, NewDb, idle_limit()};
+    {reply, {ok, Replies}, NewDb};
 handle_call(Msg, From, Db) ->
     case couch_db_engine:handle_db_updater_call(Msg, From, Db) of
         {reply, Resp, NewDb} ->
-            {reply, Resp, NewDb, idle_limit()};
+            {reply, Resp, NewDb};
         Else ->
             Else
     end.
@@ -128,7 +137,7 @@ handle_call(Msg, From, Db) ->
 handle_cast({load_validation_funs, ValidationFuns}, Db) ->
     Db2 = Db#db{validate_doc_funs = ValidationFuns},
     ok = couch_server:db_updated(Db2),
-    {noreply, Db2, idle_limit()};
+    {noreply, Db2};
 handle_cast(start_compact, Db) ->
     case Db#db.compactor_pid of
         nil ->
@@ -146,16 +155,14 @@ handle_cast(start_compact, Db) ->
             couch_log:Level("Starting compaction for db \"~s\" at ~p", Args),
             {ok, Db2} = couch_db_engine:start_compaction(Db),
             ok = couch_server:db_updated(Db2),
-            {noreply, Db2, idle_limit()};
+            {noreply, Db2};
         _ ->
             % compact currently running, this is a no-op
-            {noreply, Db, idle_limit()}
+            {noreply, Db}
     end;
 handle_cast({compact_done, _Engine, CompactInfo}, #db{} = OldDb) ->
     {ok, NewDb} = couch_db_engine:finish_compaction(OldDb, CompactInfo),
     {noreply, NewDb};
-handle_cast(wakeup, Db) ->
-    {noreply, Db, idle_limit()};
 handle_cast(Msg, #db{name = Name} = Db) ->
     couch_log:error(
         "Database `~s` updater received unexpected cast: ~p",
@@ -213,40 +220,20 @@ handle_info(
                     false ->
                         Db2
                 end,
-            {noreply, Db3, hibernate_if_no_idle_limit()}
+            {noreply, Db3, hibernate}
     catch
         throw:retry ->
             [catch (ClientPid ! {retry, self()}) || ClientPid <- Clients],
-            {noreply, Db, hibernate_if_no_idle_limit()}
+            {noreply, Db, hibernate}
     end;
 handle_info({'EXIT', _Pid, normal}, Db) ->
-    {noreply, Db, idle_limit()};
+    {noreply, Db};
 handle_info({'EXIT', _Pid, Reason}, Db) ->
     {stop, Reason, Db};
-handle_info(timeout, #db{name = DbName} = Db) ->
-    IdleLimitMSec = update_idle_limit_from_config(),
-    case couch_db:is_idle(Db) of
-        true ->
-            LastActivity = couch_db_engine:last_activity(Db),
-            DtMSec = timer:now_diff(os:timestamp(), LastActivity) div 1000,
-            MSecSinceLastActivity = max(0, DtMSec),
-            case MSecSinceLastActivity > IdleLimitMSec of
-                true ->
-                    ok = couch_server:close_db_if_idle(DbName);
-                false ->
-                    ok
-            end;
-        false ->
-            ok
-    end,
-    % Send a message to wake up and then hibernate. Hibernation here is done to
-    % force a thorough garbage collection.
-    gen_server:cast(self(), wakeup),
-    {noreply, Db, hibernate};
 handle_info(Msg, Db) ->
     case couch_db_engine:handle_db_updater_info(Msg, Db) of
         {noreply, NewDb} ->
-            {noreply, NewDb, idle_limit()};
+            {noreply, NewDb};
         Else ->
             Else
     end.
@@ -332,13 +319,18 @@ init_db(DbName, FilePath, EngineState, Options) ->
         after_doc_read = ADR
     },
 
-    DbProps = couch_db_engine:get_props(InitDb),
-
-    InitDb#db{
+    Db = InitDb#db{
         committed_update_seq = couch_db_engine:get_update_seq(InitDb),
         security = couch_db_engine:get_security(InitDb),
-        options = lists:keystore(props, 1, NonCreateOpts, {props, DbProps})
-    }.
+        time_seq = couch_db_engine:get_time_seq(InitDb),
+        options = NonCreateOpts
+    },
+    DbProps = couch_db_engine:get_props(Db),
+    options_set_props(Db, DbProps).
+
+options_set_props(#db{options = Options} = Db, Props) ->
+    Options1 = lists:keystore(props, 1, Options, {props, Props}),
+    Db#db{options = Options1}.
 
 refresh_validate_doc_funs(#db{name = <<"shards/", _/binary>> = Name} = Db) ->
     spawn(fabric, reset_validation_funs, [mem3:dbname(Name)]),
@@ -451,10 +443,9 @@ add_sizes(leaf, #leaf{sizes = Sizes, atts = AttSizes}, Acc) ->
     NewESAcc = ExternalSize + ESAcc,
     NewAttsAcc = lists:umerge(AttSizes, AttsAcc),
     {NewASAcc, NewESAcc, NewAttsAcc};
-add_sizes(_, #leaf{atts = AttSizes}, Acc) ->
+add_sizes(_, #leaf{}, Acc) ->
     % For intermediate nodes external and active contribution is 0
-    {ASAcc, ESAcc, AttsAcc} = Acc,
-    {ASAcc, ESAcc, lists:umerge(AttSizes, AttsAcc)}.
+    Acc.
 
 upgrade_sizes(#size_info{} = SI) ->
     SI;
@@ -820,22 +811,22 @@ purge_docs(Db, PurgeReqs) ->
     FDIs = couch_db_engine:open_docs(Db, Ids),
     USeq = couch_db_engine:get_update_seq(Db),
 
-    IdFDIs = lists:zip(Ids, FDIs),
+    IdFDIs = maps:from_list(lists:zip(Ids, FDIs)),
     {NewIdFDIs, Replies} = apply_purge_reqs(PurgeReqs, IdFDIs, USeq, []),
 
-    Pairs = lists:flatmap(
-        fun({DocId, OldFDI}) ->
-            {DocId, NewFDI} = lists:keyfind(DocId, 1, NewIdFDIs),
-            case {OldFDI, NewFDI} of
-                {not_found, not_found} ->
-                    [];
-                {#full_doc_info{} = A, #full_doc_info{} = A} ->
-                    [];
-                {#full_doc_info{}, _} ->
-                    [{OldFDI, NewFDI}]
-            end
-        end,
-        IdFDIs
+    Pairs = lists:sort(
+        maps:fold(
+            fun(DocId, OldFDI, Acc) ->
+                #{DocId := NewFDI} = NewIdFDIs,
+                case {OldFDI, NewFDI} of
+                    {not_found, not_found} -> Acc;
+                    {#full_doc_info{} = A, #full_doc_info{} = A} -> Acc;
+                    {#full_doc_info{}, _} -> [{OldFDI, NewFDI} | Acc]
+                end
+            end,
+            [],
+            IdFDIs
+        )
     ),
 
     PSeq = couch_db_engine:get_purge_seq(Db),
@@ -859,7 +850,7 @@ apply_purge_reqs([], IdFDIs, _USeq, Replies) ->
     {IdFDIs, lists:reverse(Replies)};
 apply_purge_reqs([Req | RestReqs], IdFDIs, USeq, Replies) ->
     {_UUID, DocId, Revs} = Req,
-    {value, {_, FDI0}, RestIdFDIs} = lists:keytake(DocId, 1, IdFDIs),
+    #{DocId := FDI0} = IdFDIs,
     {NewFDI, RemovedRevs, NewUSeq} =
         case FDI0 of
             #full_doc_info{rev_tree = Tree} ->
@@ -897,15 +888,27 @@ apply_purge_reqs([Req | RestReqs], IdFDIs, USeq, Replies) ->
                 % Not found means nothing to change
                 {not_found, [], USeq}
         end,
-    NewIdFDIs = [{DocId, NewFDI} | RestIdFDIs],
     NewReplies = [{ok, RemovedRevs} | Replies],
-    apply_purge_reqs(RestReqs, NewIdFDIs, NewUSeq, NewReplies).
+    apply_purge_reqs(RestReqs, IdFDIs#{DocId := NewFDI}, NewUSeq, NewReplies).
+
+update_time_seq(#db{time_seq = TSeq} = Db, Seq) when is_integer(Seq) ->
+    Timestamp = couch_time_seq:timestamp(),
+    TSeq1 = couch_time_seq:update(TSeq, Timestamp, Seq),
+    % Do not expect this structure to update very often, so only
+    % update the engine if its value changed
+    case TSeq =:= TSeq1 of
+        true ->
+            {ok, Db};
+        false ->
+            Db1 = Db#db{time_seq = TSeq1},
+            couch_db_engine:set_time_seq(Db1, TSeq1)
+    end.
 
 commit_data(Db) ->
-    {ok, Db1} = couch_db_engine:commit_data(Db),
-    Db1#db{
-        committed_update_seq = couch_db_engine:get_update_seq(Db)
-    }.
+    UpdateSeq = couch_db_engine:get_update_seq(Db),
+    {ok, Db1} = update_time_seq(Db, Db#db.committed_update_seq),
+    {ok, Db2} = couch_db_engine:commit_data(Db1),
+    Db2#db{committed_update_seq = UpdateSeq}.
 
 pair_write_info(Old, New) ->
     lists:map(
@@ -941,33 +944,6 @@ default_security_object(_DbName) ->
             ];
         "everyone" ->
             []
-    end.
-
-% These functions rely on using the process dictionary. This is
-% usually frowned upon however in this case it is done to avoid
-% changing to a different server state record. Once PSE (Pluggable
-% Storage Engine) code lands this should be moved to the #db{} record.
-update_idle_limit_from_config() ->
-    Default = integer_to_list(?IDLE_LIMIT_DEFAULT),
-    IdleLimit =
-        case config:get("couchdb", "idle_check_timeout", Default) of
-            "infinity" ->
-                infinity;
-            Milliseconds ->
-                list_to_integer(Milliseconds)
-        end,
-    put(idle_limit, IdleLimit),
-    IdleLimit.
-
-idle_limit() ->
-    get(idle_limit).
-
-hibernate_if_no_idle_limit() ->
-    case idle_limit() of
-        infinity ->
-            hibernate;
-        Timeout when is_integer(Timeout) ->
-            Timeout
     end.
 
 -ifdef(TEST).

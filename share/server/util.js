@@ -116,20 +116,33 @@ var Couch = {
         "Expression does not eval to a function. (" + source.toString() + ")"]);
     };
   },
-  recursivelySeal : function(obj) {
-    seal(obj);
-    for (var propname in obj) {
-      if (typeof obj[propname] == "object") {
-        arguments.callee(obj[propname]);
-      }
-    }
-  }
+  recursivelySeal: deepFreeze,
 };
 
 function errstr(e) {
   // toSource() is a Spidermonkey "special"
   return (e.toSource ? e.toSource() : e.toString());
 };
+
+// If we have an object which looks like an Error, then make it so it
+// can be json stringified so it keeps the message and name,
+// otherwise, most modern JS engine will stringify Error object as
+// {}. Unfortnately, because of sandboxing we cannot use `e instanceof
+// Error` as the Error object in the sandbox won't technically be the
+// same error object as the one from our wrapper JS functions, so we
+// use some "ducktyping" to detect the Error.
+//
+function error_to_json(e) {
+    if (typeof e === "object"
+        && e != null
+        && 'stack' in e
+        && 'name' in e
+        && 'message' in e
+    ) {
+        return {'error': e.name, 'message': e.message}
+    };
+    return e;
+}
 
 // prints the object as JSON, and rescues and logs any JSON.stringify() related errors
 function respond(obj) {
@@ -146,11 +159,42 @@ function log(message) {
   if (typeof message == "xml") {
     message = message.toXMLString();
   } else if (typeof message != "string") {
-    message = JSON.stringify(message);
+    message = JSON.stringify(error_to_json(message));
   }
   respond(["log", String(message)]);
 };
 
 function isArray(obj) {
   return toString.call(obj) === "[object Array]";
+}
+
+function getPropNames(object) {
+  if (typeof Reflect === 'undefined') {
+    return Object.getOwnPropertyNames(object);
+  } else {
+    return Reflect.ownKeys(object);
+  }
+}
+
+function deepFreeze(object) {
+    if (Object.isFrozen(object)) {
+        return object;
+    }
+    Object.freeze(object);
+    // Retrieve the property names defined on object
+    // `Reflect.ownKeys()` gives us all own property name strings as well as
+    // symbols, so it is a bit more complete, but it is a newer JS API, so we
+    // fall back on `Object.getOwnPropertyNames()` in JS engines that don’t
+    // understand symbols yet (SpiderMonkey 1.8.5). It is a safe fallback
+    // because until then object keys can only be strings.
+    const propNames = getPropNames(object);
+
+    // Freeze properties before freezing self
+    for (var i in propNames) {
+        const value = object[propNames[i]];
+
+        if ((value && typeof value === "object") || typeof value === "function") {
+            deepFreeze(value);
+        }
+    }
 }

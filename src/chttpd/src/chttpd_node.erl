@@ -16,6 +16,7 @@
 -export([
     handle_node_req/1,
     get_stats/0,
+    get_versions/0,
     run_queues/0,
     message_queues/0,
     db_pid_stats/0
@@ -46,35 +47,10 @@ handle_node_req(#httpd{method = 'GET', path_parts = [_, _Node, <<"_smoosh">>, <<
 handle_node_req(#httpd{path_parts = [_, _Node, <<"_smoosh">>, <<"status">>]} = Req) ->
     send_method_not_allowed(Req, "GET");
 % GET /_node/$node/_versions
-handle_node_req(#httpd{method = 'GET', path_parts = [_, _Node, <<"_versions">>]} = Req) ->
-    IcuVer = couch_ejson_compare:get_icu_version(),
-    UcaVer = couch_ejson_compare:get_uca_version(),
-    ColVer = couch_ejson_compare:get_collator_version(),
-    Hashes = crypto:supports(hashs),
-    EngineName = couch_server:get_js_engine(),
-    JsEngine =
-        case EngineName of
-            <<"spidermonkey">> ->
-                #{
-                    name => EngineName,
-                    version => couch_server:get_spidermonkey_version()
-                };
-            _Other ->
-                #{name => EngineName}
-        end,
-    send_json(Req, 200, #{
-        erlang => #{
-            version => ?l2b(?COUCHDB_ERLANG_VERSION),
-            supported_hashes => Hashes
-        },
-        collation_driver => #{
-            name => <<"libicu">>,
-            library_version => couch_util:version_to_binary(IcuVer),
-            collation_algorithm_version => couch_util:version_to_binary(UcaVer),
-            collator_version => couch_util:version_to_binary(ColVer)
-        },
-        javascript_engine => JsEngine
-    });
+handle_node_req(#httpd{method = 'GET', path_parts = [_, Node, <<"_versions">>]} = Req) ->
+    Versions = call_node(Node, chttpd_node, get_versions, []),
+    EJSON = couch_stats_httpd:to_ejson(Versions),
+    send_json(Req, EJSON);
 handle_node_req(#httpd{path_parts = [_, _Node, <<"_versions">>]} = Req) ->
     send_method_not_allowed(Req, "GET");
 % GET /_node/$node/_config
@@ -215,7 +191,7 @@ handle_node_req(#httpd{
         "max_http_request_size", 4294967296
     ),
     NewOpts = [{body, MochiReq0:recv_body(MaxSize)} | MochiReq0:get(opts)],
-    Ref = erlang:make_ref(),
+    Ref = make_ref(),
     MochiReq = mochiweb_request:new(
         {remote, self(), Ref},
         NewOpts,
@@ -310,6 +286,7 @@ get_stats() ->
         {run_queue, SQ},
         {run_queue_dirty_cpu, DCQ},
         {ets_table_count, length(ets:all())},
+        {bt_engine_cache, couch_bt_engine_cache:info()},
         {context_switches, element(1, statistics(context_switches))},
         {reductions, element(1, statistics(reductions))},
         {garbage_collection_count, NumberOfGCs},
@@ -325,6 +302,48 @@ get_stats() ->
         {distribution, {get_distribution_stats()}},
         {distribution_events, mem3_distribution:events()}
     ].
+
+get_versions() ->
+    IcuVer = couch_ejson_compare:get_icu_version(),
+    UcaVer = couch_ejson_compare:get_uca_version(),
+    ColVer = couch_ejson_compare:get_collator_version(),
+    Hashes = crypto:supports(hashs),
+    EngineName = couch_server:get_js_engine(),
+    JsEngine =
+        case EngineName of
+            <<"spidermonkey">> ->
+                #{
+                    name => EngineName,
+                    version => couch_server:get_spidermonkey_version()
+                };
+            _Other ->
+                #{name => EngineName}
+        end,
+    ClouseauResponse =
+        case clouseau_rpc:version() of
+            {ok, Version} when is_binary(Version) ->
+                #{
+                    clouseau => #{
+                        version => Version
+                    }
+                };
+            _ ->
+                #{}
+        end,
+    BaseResponse = #{
+        erlang => #{
+            version => ?l2b(?COUCHDB_ERLANG_VERSION),
+            supported_hashes => Hashes
+        },
+        collation_driver => #{
+            name => <<"libicu">>,
+            library_version => couch_util:version_to_binary(IcuVer),
+            collation_algorithm_version => couch_util:version_to_binary(UcaVer),
+            collator_version => couch_util:version_to_binary(ColVer)
+        },
+        javascript_engine => JsEngine
+    },
+    maps:merge(BaseResponse, ClouseauResponse).
 
 db_pid_stats_formatted() ->
     {CF, CDU} = db_pid_stats(),

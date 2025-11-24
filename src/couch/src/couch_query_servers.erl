@@ -14,11 +14,12 @@
 
 -export([try_compile/4]).
 -export([start_doc_map/3, map_doc_raw/2, stop_doc_map/1, raw_to_ejson/1]).
--export([reduce/3, rereduce/3, validate_doc_update/6]).
+-export([reduce/3, reduce/4, rereduce/3, rereduce/4, validate_doc_update/6]).
 -export([filter_docs/5]).
 -export([filter_view/4]).
 -export([finalize/2]).
 -export([rewrite/3]).
+-export([reduce_limit_threshold/0, reduce_limit_ratio/0]).
 
 -export([with_ddoc_proc/3, proc_prompt/2, ddoc_prompt/4, ddoc_proc_prompt/3, json_doc/1]).
 
@@ -100,29 +101,41 @@ finalize(<<"_approx_count_distinct", _/binary>>, Reduction) ->
     {ok, round(couch_hyper:card(Reduction))};
 finalize(<<"_stats", _/binary>>, Unpacked) ->
     {ok, pack_stats(Unpacked)};
+finalize(<<"_first", _/binary>>, {_K, _Id, V}) ->
+    {ok, V};
+finalize(<<"_last", _/binary>>, {_K, _Id, V}) ->
+    {ok, V};
 finalize(_RedSrc, Reduction) ->
     {ok, Reduction}.
 
-rereduce(_Lang, [], _ReducedValues) ->
+rereduce(Lang, RedSrcs, _ReducedValues) ->
+    rereduce(Lang, RedSrcs, _ReducedValues, <<>>).
+
+rereduce(_Lang, [], _ReducedValues, _Ctx) ->
     {ok, []};
-rereduce(Lang, RedSrcs, ReducedValues) ->
+rereduce(Lang, RedSrcs, ReducedValues, Ctx) ->
     Grouped = group_reductions_results(ReducedValues),
     Results = lists:zipwith(
         fun
             (<<"_", _/binary>> = FunSrc, Values) ->
-                {ok, [Result]} = builtin_reduce(rereduce, [FunSrc], [[[], V] || V <- Values], []),
+                {ok, [Result]} = builtin_reduce(
+                    rereduce, [FunSrc], [[[], V] || V <- Values], [], Ctx
+                ),
                 Result;
             (FunSrc, Values) ->
-                os_rereduce(Lang, [FunSrc], Values)
+                os_rereduce(Lang, [FunSrc], Values, Ctx)
         end,
         RedSrcs,
         Grouped
     ),
     {ok, Results}.
 
-reduce(_Lang, [], _KVs) ->
+reduce(Lang, RedSrcs, _KVs) ->
+    reduce(Lang, RedSrcs, _KVs, <<>>).
+
+reduce(_Lang, [], _KVs, _Ctx) ->
     {ok, []};
-reduce(Lang, RedSrcs, KVs) ->
+reduce(Lang, RedSrcs, KVs, Ctx) ->
     {OsRedSrcs, BuiltinReds} = lists:partition(
         fun
             (<<"_", _/binary>>) -> false;
@@ -130,8 +143,8 @@ reduce(Lang, RedSrcs, KVs) ->
         end,
         RedSrcs
     ),
-    {ok, OsResults} = os_reduce(Lang, OsRedSrcs, KVs),
-    {ok, BuiltinResults} = builtin_reduce(reduce, BuiltinReds, KVs, []),
+    {ok, OsResults} = os_reduce(Lang, OsRedSrcs, KVs, Ctx),
+    {ok, BuiltinResults} = builtin_reduce(reduce, BuiltinReds, KVs, [], Ctx),
     recombine_reduce_results(RedSrcs, OsResults, BuiltinResults, []).
 
 recombine_reduce_results([], [], [], Acc) ->
@@ -141,12 +154,12 @@ recombine_reduce_results([<<"_", _/binary>> | RedSrcs], OsResults, [BRes | Built
 recombine_reduce_results([_OsFun | RedSrcs], [OsR | OsResults], BuiltinResults, Acc) ->
     recombine_reduce_results(RedSrcs, OsResults, BuiltinResults, [OsR | Acc]).
 
-os_reduce(_Lang, [], _KVs) ->
+os_reduce(_Lang, [], _KVs, _Ctx) ->
     {ok, []};
-os_reduce(Lang, OsRedSrcs, KVs) ->
+os_reduce(Lang, OsRedSrcs, KVs, Ctx) ->
     Proc = get_os_process(Lang),
     OsResults =
-        try proc_prompt(Proc, [<<"reduce">>, OsRedSrcs, KVs]) of
+        try proc_prompt(Proc, [<<"reduce">>, OsRedSrcs, KVs, Ctx]) of
             [true, Reductions] -> Reductions
         catch
             throw:{reduce_overflow_error, Msg} ->
@@ -156,11 +169,11 @@ os_reduce(Lang, OsRedSrcs, KVs) ->
         end,
     {ok, OsResults}.
 
-os_rereduce(Lang, OsRedSrcs, KVs) ->
+os_rereduce(Lang, OsRedSrcs, KVs, Ctx) ->
     case get_overflow_error(KVs) of
         undefined ->
             Proc = get_os_process(Lang),
-            try proc_prompt(Proc, [<<"rereduce">>, OsRedSrcs, KVs]) of
+            try proc_prompt(Proc, [<<"rereduce">>, OsRedSrcs, KVs, Ctx]) of
                 [true, [Reduction]] -> Reduction
             catch
                 throw:{reduce_overflow_error, Msg} ->
@@ -179,24 +192,36 @@ get_overflow_error([{[{reduce_overflow_error, _}]} = Error | _]) ->
 get_overflow_error([_ | Rest]) ->
     get_overflow_error(Rest).
 
-builtin_reduce(_Re, [], _KVs, Acc) ->
+builtin_reduce(_Re, [], _KVs, Acc, _Ctx) ->
     {ok, lists:reverse(Acc)};
-builtin_reduce(Re, [<<"_sum", _/binary>> | BuiltinReds], KVs, Acc) ->
+builtin_reduce(Re, [<<"_sum", _/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
     Sum = builtin_sum_rows(KVs, 0),
-    Red = check_sum_overflow(?term_size(KVs), ?term_size(Sum), Sum),
-    builtin_reduce(Re, BuiltinReds, KVs, [Red | Acc]);
-builtin_reduce(reduce, [<<"_count", _/binary>> | BuiltinReds], KVs, Acc) ->
+    Red = check_sum_overflow(?term_size(KVs), ?term_size(Sum), Sum, Ctx),
+    builtin_reduce(Re, BuiltinReds, KVs, [Red | Acc], Ctx);
+builtin_reduce(reduce, [<<"_count", _/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
     Count = length(KVs),
-    builtin_reduce(reduce, BuiltinReds, KVs, [Count | Acc]);
-builtin_reduce(rereduce, [<<"_count", _/binary>> | BuiltinReds], KVs, Acc) ->
+    builtin_reduce(reduce, BuiltinReds, KVs, [Count | Acc], Ctx);
+builtin_reduce(rereduce, [<<"_count", _/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
     Count = builtin_sum_rows(KVs, 0),
-    builtin_reduce(rereduce, BuiltinReds, KVs, [Count | Acc]);
-builtin_reduce(Re, [<<"_stats", _/binary>> | BuiltinReds], KVs, Acc) ->
+    builtin_reduce(rereduce, BuiltinReds, KVs, [Count | Acc], Ctx);
+builtin_reduce(Re, [<<"_stats", _/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
     Stats = builtin_stats(Re, KVs),
-    builtin_reduce(Re, BuiltinReds, KVs, [Stats | Acc]);
-builtin_reduce(Re, [<<"_approx_count_distinct", _/binary>> | BuiltinReds], KVs, Acc) ->
+    builtin_reduce(Re, BuiltinReds, KVs, [Stats | Acc], Ctx);
+builtin_reduce(Re, [<<"_approx_count_distinct", _/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
     Distinct = approx_count_distinct(Re, KVs),
-    builtin_reduce(Re, BuiltinReds, KVs, [Distinct | Acc]).
+    builtin_reduce(Re, BuiltinReds, KVs, [Distinct | Acc], Ctx);
+builtin_reduce(Re, [<<"_top_", N/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
+    Top = builtin_rank_n(Re, fun rank_fun_top/2, binary_to_integer(N), KVs),
+    builtin_reduce(Re, BuiltinReds, KVs, [Top | Acc], Ctx);
+builtin_reduce(Re, [<<"_bottom_", N/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
+    Bottom = builtin_rank_n(Re, fun rank_fun_bottom/2, binary_to_integer(N), KVs),
+    builtin_reduce(Re, BuiltinReds, KVs, [Bottom | Acc], Ctx);
+builtin_reduce(Re, [<<"_first", _/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
+    First = builtin_first_last(Re, fun builtin_cmp_first/2, KVs),
+    builtin_reduce(Re, BuiltinReds, KVs, [First | Acc], Ctx);
+builtin_reduce(Re, [<<"_last", _/binary>> | BuiltinReds], KVs, Acc, Ctx) ->
+    Last = builtin_first_last(Re, fun builtin_cmp_last/2, KVs),
+    builtin_reduce(Re, BuiltinReds, KVs, [Last | Acc], Ctx).
 
 builtin_sum_rows([], Acc) ->
     Acc;
@@ -261,30 +286,37 @@ sum_arrays([X | Xs], [Y | Ys]) when is_number(X), is_number(Y) ->
 sum_arrays(Else, _) ->
     throw_sum_error(Else).
 
-check_sum_overflow(InSize, OutSize, Sum) ->
-    Overflowed = OutSize > 4906 andalso OutSize * 2 > InSize,
+check_sum_overflow(InSize, OutSize, Sum, Ctx) ->
+    Overflowed = OutSize > reduce_limit_threshold() andalso OutSize * reduce_limit_ratio() > InSize,
     case config:get("query_server_config", "reduce_limit", "true") of
         "true" when Overflowed ->
-            Msg = log_sum_overflow(InSize, OutSize),
+            Msg = log_sum_overflow(InSize, OutSize, Ctx),
             {[
                 {<<"error">>, <<"builtin_reduce_error">>},
                 {<<"reason">>, Msg}
             ]};
         "log" when Overflowed ->
-            log_sum_overflow(InSize, OutSize),
+            log_sum_overflow(InSize, OutSize, Ctx),
             Sum;
         _ ->
             Sum
     end.
 
-log_sum_overflow(InSize, OutSize) ->
+log_sum_overflow(InSize, OutSize, Ctx) ->
     Fmt =
         "Reduce output must shrink more rapidly: "
         "input size: ~b "
-        "output size: ~b",
-    Msg = iolist_to_binary(io_lib:format(Fmt, [InSize, OutSize])),
+        "output size: ~b "
+        "context: ~s",
+    Msg = iolist_to_binary(io_lib:format(Fmt, [InSize, OutSize, Ctx])),
     couch_log:error(Msg, []),
     Msg.
+
+reduce_limit_threshold() ->
+    config:get_integer("query_server_config", "reduce_limit_threshold", 5000).
+
+reduce_limit_ratio() ->
+    config:get_float("query_server_config", "reduce_limit_ratio", 2.0).
 
 builtin_stats(_, []) ->
     {0, 0, 0, 0, 0};
@@ -311,8 +343,8 @@ stat_values(Value, Acc) when is_tuple(Value), is_tuple(Acc) ->
     {
         Sum0 + Sum1,
         Cnt0 + Cnt1,
-        erlang:min(Min0, Min1),
-        erlang:max(Max0, Max1),
+        min(Min0, Min1),
+        max(Max0, Max1),
         Sqr0 + Sqr1
     };
 stat_values(Else, _Acc) ->
@@ -384,6 +416,54 @@ approx_count_distinct(reduce, KVs) ->
     );
 approx_count_distinct(rereduce, Reds) ->
     couch_hyper:union([Filter || [_, Filter] <- Reds]).
+
+builtin_rank_n(reduce, RankFun, N, KVs) when is_integer(N), N > 0 ->
+    Fun = fun([[_Key, _Id], Value], Acc) -> lists:umerge(RankFun, Acc, [Value]) end,
+    lists:sublist(lists:foldl(Fun, [], KVs), N);
+builtin_rank_n(rereduce, _Rank, N, []) when is_integer(N), N > 0 ->
+    [];
+builtin_rank_n(rereduce, RankFun, N, [[_, KVs0] | Rest]) when is_integer(N), N > 0 ->
+    Fun = fun([_, KVs], Acc) -> lists:umerge(RankFun, Acc, KVs) end,
+    lists:sublist(lists:foldl(Fun, KVs0, Rest), N).
+
+rank_fun_top(A, B) ->
+    couch_ejson_compare:less(A, B) >= 0.
+
+rank_fun_bottom(A, B) ->
+    couch_ejson_compare:less(A, B) =< 0.
+
+builtin_first_last(reduce, _CmpFun, []) ->
+    [];
+builtin_first_last(reduce, CmpFun, [[[Key0, Id0], Value0] | Rest]) ->
+    lists:foldl(
+        fun([[K, Id], V], {AccK, AccId, _AccV} = Acc) ->
+            case CmpFun({K, Id}, {AccK, AccId}) of
+                true -> {K, Id, V};
+                false -> Acc
+            end
+        end,
+        {Key0, Id0, Value0},
+        Rest
+    );
+builtin_first_last(rereduce, _CmpFun, []) ->
+    [];
+builtin_first_last(rereduce, CmpFun, [[_, {K0, Id0, V0}] | Rest]) ->
+    lists:foldl(
+        fun([_, {K, Id, V}], {AccK, AccId, _AccV} = Acc) ->
+            case CmpFun({K, Id}, {AccK, AccId}) of
+                true -> {K, Id, V};
+                false -> Acc
+            end
+        end,
+        {K0, Id0, V0},
+        Rest
+    ).
+
+builtin_cmp_first(A, B) ->
+    couch_ejson_compare:less_json_ids(A, B).
+
+builtin_cmp_last(A, B) ->
+    not couch_ejson_compare:less_json_ids(A, B).
 
 % use the function stored in ddoc.validate_doc_update to test an update.
 -spec validate_doc_update(Db, DDoc, EditDoc, DiskDoc, Ctx, SecObj) -> ok when

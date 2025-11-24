@@ -16,7 +16,7 @@ var Views = (function() {
 
   var map_results = []; // holds temporary emitted values during doc map
 
-  function runReduce(reduceFuns, keys, values, rereduce) {
+  function runReduce(reduceFuns, keys, values, rereduce, ctx) {
     var code_size = 0;
     for (var i in reduceFuns) {
       var fun_body =  reduceFuns[i];
@@ -36,13 +36,14 @@ var Views = (function() {
     var reduce_line = JSON.stringify(reductions);
     var reduce_length = reduce_line.length;
     var input_length =  State.line_length - code_size
-    // TODO make reduce_limit config into a number
     if (State.query_config && State.query_config.reduce_limit &&
-          reduce_length > 4096 && ((reduce_length * 2) > input_length)) {
+        reduce_length > State.query_config.reduce_limit_threshold &&
+        ((reduce_length * State.query_config.reduce_limit_ratio) > input_length)) {
       var log_message = [
           "Reduce output must shrink more rapidly:",
           "input size:", input_length,
-          "output size:", reduce_length
+          "output size:", reduce_length,
+          "context:", ctx
       ].join(" ");
       if (State.query_config.reduce_limit === "log") {
           log("reduce_overflow_error: " + log_message);
@@ -65,8 +66,8 @@ var Views = (function() {
       // fatal_error. But by default if they don't do error handling we
       // just eat the exception and carry on.
       //
-      // In this case we abort map processing but don't destroy the 
-      // JavaScript process. If you need to destroy the JavaScript 
+      // In this case we abort map processing but don't destroy the
+      // JavaScript process. If you need to destroy the JavaScript
       // process, throw the error form matched by the block below.
       throw(["error", "map_runtime_error", "function raised 'fatal_error'"]);
     } else if (err[0] == "fatal") {
@@ -84,7 +85,7 @@ var Views = (function() {
   return {
     // view helper functions
     emit : function(key, value) {
-      map_results.push([key, value]);
+      map_results.push([key, error_to_json(value)]);
     },
     sum : function(values) {
       var rv = 0;
@@ -93,17 +94,17 @@ var Views = (function() {
       }
       return rv;
     },
-    reduce : function(reduceFuns, kvs) {
+    reduce : function(reduceFuns, kvs, ctx) {
       var keys = new Array(kvs.length);
       var values = new Array(kvs.length);
       for(var i = 0; i < kvs.length; i++) {
           keys[i] = kvs[i][0];
           values[i] = kvs[i][1];
       }
-      runReduce(reduceFuns, keys, values, false);
+      runReduce(reduceFuns, keys, values, false, ctx);
     },
-    rereduce : function(reduceFuns, values) {
-      runReduce(reduceFuns, null, values, true);
+    rereduce : function(reduceFuns, values, ctx) {
+      runReduce(reduceFuns, null, values, true, ctx);
     },
     mapDoc : function(doc) {
       // Compute all the map functions against the document.

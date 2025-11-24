@@ -40,7 +40,7 @@ from pbkdf2 import pbkdf2_hex
 
 COMMON_SALT = uuid.uuid4().hex
 
-from urllib.request import urlopen
+from urllib.request import *
 import http.client as httpclient
 
 
@@ -515,7 +515,7 @@ def write_config(ctx, node, env):
             content = apply_config_overrides(ctx, content)
         elif base == "local.ini":
             content = hack_local_ini(ctx, content)
-        elif ctx["enable_tls"] and base == "vm.args":
+        elif base == "vm.args":
             content = hack_vm_args(ctx, node, content)
 
         with open(tgt, "w") as handle:
@@ -839,16 +839,23 @@ def hack_local_ini(ctx, contents):
 
 
 def hack_vm_args(ctx, node, contents):
-    contents += f"""
+    if ctx["enable_tls"]:
+        contents += f"""
 -proto_dist couch
 -couch_dist no_tls '"clouseau{node[-1]}@127.0.0.1"'
 -ssl_dist_optfile {ctx["rootdir"]}/src/couch_dist/certs/out/couch_dist.conf
-    """
-    if ctx["no_tls"]:
-        no_tls_nodes = ctx["no_tls"].split(",")
-        for node_name in no_tls_nodes:
-            node_name = node_name if "@" in node_name else f"{node_name}@127.0.0.1"
-            contents += f"""\n-couch_dist no_tls '"{node_name}"'"""
+"""
+        if ctx["no_tls"]:
+            no_tls_nodes = ctx["no_tls"].split(",")
+            for node_name in no_tls_nodes:
+                node_name = node_name if "@" in node_name else f"{node_name}@127.0.0.1"
+                contents += f"""
+-couch_dist no_tls '"{node_name}"'
+"""
+    if ctx["erlang_cookie"]:
+        contents += f"""
+-setcookie {ctx["erlang_cookie"]}
+"""
     return contents
 
 
@@ -942,7 +949,7 @@ def ensure_all_nodes_alive(ctx):
             local_port = cluster_port(ctx, idnode)
             url = "http://127.0.0.1:{0}/".format(local_port)
             try:
-                check_node_alive(url)
+                check_node_alive(url, *ctx["admin"])
                 maybe_check_clouseau_node_alive(ctx, idnode)
             except:
                 pass
@@ -957,8 +964,15 @@ def ensure_all_nodes_alive(ctx):
 
 
 @log("Check node at {url}")
-def check_node_alive(url):
+def check_node_alive(url, user, pswd):
     error = None
+
+    PasswordMgr = HTTPPasswordMgrWithDefaultRealm()
+    PasswordMgr.add_password(None, url, user, pswd)
+    AuthHandler = HTTPBasicAuthHandler(PasswordMgr)
+    opener = build_opener(AuthHandler)
+    install_opener(opener)
+
     for _ in range(10):
         try:
             with contextlib.closing(urlopen(url)):

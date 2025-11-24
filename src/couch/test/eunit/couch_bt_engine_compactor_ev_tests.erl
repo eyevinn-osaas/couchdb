@@ -20,6 +20,8 @@
 -define(EV_MOD, couch_bt_engine_compactor_ev).
 -define(INIT_DOCS, 2500).
 -define(WRITE_DOCS, 20).
+-define(TSEQ_BOGUS_TIME, "3000-01-01T00:00:00Z").
+-define(TSEQ_BOGUS_SEQ, 4242).
 
 % The idea behind the tests in this module are to attempt to
 % cover the number of restart/recopy events during compaction
@@ -123,12 +125,16 @@ teardown(Ctx) ->
 start_empty_db_test(_Event) ->
     ?EV_MOD:clear(),
     DbName = ?tempdb(),
-    {ok, _} = couch_db:create(DbName, [?ADMIN_CTX]),
+    {ok, Db} = couch_db:create(DbName, [?ADMIN_CTX]),
+    % Create a predictable time seq entry in the far future
+    % so we can test it's going to be carried along to the
+    % new compaction target and not get reset
+    ok = add_bogus_time_seq(Db),
     DbName.
 
 start_populated_db_test(Event) ->
     DbName = start_empty_db_test(Event),
-    {ok, Db} = couch_db:open_int(DbName, []),
+    {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX]),
     try
         populate_db(Db, ?INIT_DOCS)
     after
@@ -228,7 +234,7 @@ run_static_init(Event, DbName) ->
 run_static(Event, DbName) ->
     {ok, ContinueFun} = ?EV_MOD:set_wait(init),
     {ok, Reason} = ?EV_MOD:set_crash(Event),
-    {ok, Db} = couch_db:open_int(DbName, []),
+    {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX]),
     Ref = couch_db:monitor(Db),
     {ok, CPid} = couch_db:start_compact(Db),
     ContinueFun(CPid),
@@ -247,7 +253,7 @@ run_dynamic_init(Event, DbName) ->
 run_dynamic(Event, DbName) ->
     {ok, ContinueFun} = ?EV_MOD:set_wait(init),
     {ok, Reason} = ?EV_MOD:set_crash(Event),
-    {ok, Db} = couch_db:open_int(DbName, []),
+    {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX]),
     Ref = couch_db:monitor(Db),
     {ok, CPid} = couch_db:start_compact(Db),
     ok = populate_db(Db, 10),
@@ -262,9 +268,9 @@ run_dynamic(Event, DbName) ->
 run_successful_compaction(DbName) ->
     ?EV_MOD:clear(),
     {ok, ContinueFun} = ?EV_MOD:set_wait(init),
-    {ok, Db} = couch_db:open_int(DbName, []),
+    {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX]),
     {ok, CPid} = couch_db:start_compact(Db),
-    Ref = erlang:monitor(process, CPid),
+    Ref = monitor(process, CPid),
     ContinueFun(CPid),
     receive
         {'DOWN', Ref, _, _, normal} -> ok
@@ -278,7 +284,7 @@ wait_db_cleared(Db) ->
     wait_db_cleared(Db, 5).
 
 wait_db_cleared(Db, N) when N < 0 ->
-    erlang:error({db_clear_timeout, couch_db:name(Db)});
+    error({db_clear_timeout, couch_db:name(Db)});
 wait_db_cleared(Db, N) ->
     Tab = couch_server:couch_dbs(couch_db:name(Db)),
     case ets:lookup(Tab, couch_db:name(Db)) of
@@ -296,10 +302,18 @@ wait_db_cleared(Db, N) ->
             end
     end.
 
+add_bogus_time_seq(Db) ->
+    TSeq = couch_db:get_time_seq(Db),
+    % Set some bogus future time we'll check that compaction
+    % knows how to copy it properly and not reset it during compaction
+    Time = calendar:rfc3339_to_system_time(?TSEQ_BOGUS_TIME),
+    TSeq1 = couch_time_seq:update(TSeq, Time, ?TSEQ_BOGUS_SEQ),
+    ok = couch_db:set_time_seq(Db, TSeq1).
+
 populate_db(_Db, NumDocs) when NumDocs =< 0 ->
     ok;
 populate_db(Db, NumDocs) ->
-    String = [$a || _ <- lists:seq(1, erlang:min(NumDocs, 500))],
+    String = [$a || _ <- lists:seq(1, min(NumDocs, 500))],
     Docs = lists:map(
         fun(_) ->
             couch_doc:from_json_obj(
@@ -324,7 +338,13 @@ validate_compaction(Db) ->
     end,
     {ok, {_, LastCount}} = couch_db:fold_docs(Db, FoldFun, {<<>>, 0}),
     ?assertEqual(DocCount + DelDocCount, LastCount),
-    ?assertEqual(NumChanges, LastCount).
+    ?assertEqual(NumChanges, LastCount),
+    % If there were any updates to the db check that the time seq structure
+    % was preserved
+    TSeq = couch_db:get_time_seq(Db),
+    #{bins := Bins} = TSeq,
+    Time = calendar:rfc3339_to_system_time(?TSEQ_BOGUS_TIME),
+    ?assertEqual({Time, ?TSEQ_BOGUS_SEQ}, hd(Bins)).
 
 purge_module() ->
     case code:which(couch_db_updater) of

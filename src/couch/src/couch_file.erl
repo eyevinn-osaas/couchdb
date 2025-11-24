@@ -19,11 +19,13 @@
 -define(MONITOR_CHECK, 10000).
 % 4 KiB
 -define(SIZE_BLOCK, 16#1000).
--define(IS_OLD_STATE(S), is_pid(S#file.db_monitor)).
 -define(PREFIX_SIZE, 5).
 -define(DEFAULT_READ_COUNT, 1024).
--define(WRITE_XXHASH_CHECKSUMS_KEY, {?MODULE, write_xxhash_checksums}).
--define(WRITE_XXHASH_CHECKSUMS_DEFAULT, false).
+-define(WRITE_XXHASH_CHECKSUMS_DEFAULT, true).
+
+-define(USE_CFILE_DEFAULT, true).
+-define(CFILE_SKIP_IOQ_DEFAULT, false).
+-define(CFILE_HANDLE, cfile_handle).
 
 -type block_id() :: non_neg_integer().
 -type location() :: non_neg_integer().
@@ -34,30 +36,26 @@
     is_sys,
     eof = 0,
     db_monitor,
-    pread_limit = 0
+    filepath
 }).
 
 % public API
 -export([open/1, open/2, close/1, bytes/1, sync/1, truncate/2, set_db_pid/2]).
--export([pread_term/2, pread_iolist/2, pread_binary/2]).
+-export([pread_term/2, pread_binary/2]).
 -export([append_binary/2]).
 -export([append_raw_chunk/2, assemble_file_chunk_and_checksum/1]).
 -export([append_term/2, append_term/3]).
 -export([pread_terms/2]).
 -export([append_terms/2, append_terms/3]).
--export([write_header/2, read_header/1]).
+-export([write_header/2, write_header/3, read_header/1]).
 -export([delete/2, delete/3, nuke_dir/2, init_delete_dir/1]).
--export([last_read/1]).
 
 % gen_server callbacks
--export([init/1, terminate/2, format_status/2]).
+-export([init/1, terminate/2]).
 -export([handle_call/3, handle_cast/2, handle_info/2]).
 
 %% helper functions
 -export([process_info/1]).
-
-% test helper functions
--export([reset_checksum_persistent_term_config/0]).
 
 %%----------------------------------------------------------------------
 %% Args:   Valid Options are [create] and [create,overwrite].
@@ -137,10 +135,20 @@ append_term(Fd, Term, Options) ->
 %%----------------------------------------------------------------------
 
 append_binary(Fd, Bin) ->
-    ioq:call(Fd, {append_bin, assemble_file_chunk(Bin)}, erlang:get(io_priority)).
+    case append_binaries(Fd, [Bin]) of
+        {ok, [{Pos, NumBytesWritten}]} ->
+            {ok, Pos, NumBytesWritten};
+        Error ->
+            Error
+    end.
 
 append_raw_chunk(Fd, Chunk) ->
-    ioq:call(Fd, {append_bin, Chunk}, erlang:get(io_priority)).
+    case append_raw_chunks(Fd, [Chunk]) of
+        {ok, [{Pos, NumBytesWritten}]} ->
+            {ok, Pos, NumBytesWritten};
+        Error ->
+            Error
+    end.
 
 assemble_file_chunk(Bin) ->
     [<<0:1/integer, (iolist_size(Bin)):31/integer>>, Bin].
@@ -152,61 +160,79 @@ assemble_file_chunk_and_checksum(Bin) ->
 %%----------------------------------------------------------------------
 %% Purpose: Reads a term from a file that was written with append_term
 %% Args:    Pos, the offset into the file where the term is serialized.
-%% Returns: {ok, Term}
-%%  or {error, Reason}.
+%% Returns: {ok, Term}, {error, Error} or throws an error
 %%----------------------------------------------------------------------
 
 pread_term(Fd, Pos) ->
-    {ok, Bin} = pread_binary(Fd, Pos),
-    {ok, couch_compress:decompress(Bin)}.
+    case pread_binary(Fd, Pos) of
+        {ok, Bin} -> {ok, couch_compress:decompress(Bin)};
+        Error -> Error
+    end.
 
 %%----------------------------------------------------------------------
-%% Purpose: Reads a binrary from a file that was written with append_binary
+%% Purpose: Reads a binary from a file that was written with append_binary
 %% Args:    Pos, the offset into the file where the term is serialized.
-%% Returns: {ok, Term}
-%%  or {error, Reason}.
+%% Returns: {ok, Binary}, {error, Error} or throws an error
 %%----------------------------------------------------------------------
 
 pread_binary(Fd, Pos) ->
-    {ok, L} = pread_iolist(Fd, Pos),
-    {ok, iolist_to_binary(L)}.
-
-pread_iolist(Fd, Pos) ->
-    case ioq:call(Fd, {pread_iolist, Pos}, erlang:get(io_priority)) of
-        {ok, IoList, Checksum} ->
-            {ok, verify_checksum(Fd, Pos, IoList, Checksum, false)};
-        Error ->
-            Error
+    case pread_binaries(Fd, [Pos]) of
+        {ok, [Bin]} -> {ok, Bin};
+        Error -> Error
     end.
 
 pread_terms(Fd, PosList) ->
-    {ok, Bins} = pread_binaries(Fd, PosList),
-    Terms = lists:map(
-        fun(Bin) ->
-            couch_compress:decompress(Bin)
-        end,
-        Bins
-    ),
-    {ok, Terms}.
+    case pread_binaries(Fd, PosList) of
+        {ok, Bins} -> {ok, lists:map(fun couch_compress:decompress/1, Bins)};
+        Error -> Error
+    end.
 
 pread_binaries(Fd, PosList) ->
-    {ok, Data} = pread_iolists(Fd, PosList),
-    {ok, lists:map(fun erlang:iolist_to_binary/1, Data)}.
+    ZipFun = fun(Pos, {IoList, Checksum}) ->
+        verify_checksum(Fd, Pos, iolist_to_binary(IoList), Checksum, false)
+    end,
+    case pread_iolists(Fd, PosList) of
+        {ok, DataAndChecksums} -> {ok, lists:zipwith(ZipFun, PosList, DataAndChecksums)};
+        Error -> Error
+    end.
 
 pread_iolists(Fd, PosList) ->
-    case ioq:call(Fd, {pread_iolists, PosList}, erlang:get(io_priority)) of
-        {ok, DataAndChecksums} ->
-            Data = lists:zipwith(
-                fun(Pos, {IoList, Checksum}) ->
-                    verify_checksum(Fd, Pos, IoList, Checksum, false)
-                end,
-                PosList,
-                DataAndChecksums
-            ),
-            {ok, Data};
-        Error ->
+    IoqPriority = erlang:get(io_priority),
+    IoqMsg = {pread_iolists, PosList},
+    case {get_cfile(Fd), cfile_skip_ioq()} of
+        {undefined, _} ->
+            % No cfile, that's fine, do what we always did
+            ioq:call(Fd, IoqMsg, IoqPriority);
+        {#file{} = CFile, true} ->
+            % Skip the IOQ if we have a cfile handle. Use this option on a
+            % system with enough RAM for the page cache and plenty of IO
+            % bandwidth
+            parallel_pread(CFile, PosList);
+        {#file{} = CFile, false} ->
+            % Use parallel preads only if the request would be bypassed by the
+            % IOQ. All three compatible ioqs (the two from the
+            % apache/couchdb-ioq, and the source default one) currently do not
+            % know how to call a function, they all expect to send a
+            % '$gen_call' message to a gen_server. Until we figure out how
+            % teach the IOQ(s) to call an MFA we can let them keep calling the
+            % main file descriptor gen_server.
+            case ioq:bypass(IoqMsg, IoqPriority) of
+                true -> parallel_pread(CFile, PosList);
+                false -> ioq:call(Fd, IoqMsg, IoqPriority)
+            end
+    end.
+
+parallel_pread(#file{} = CFile, PosList) when is_list(PosList) ->
+    try
+        pread(CFile, PosList)
+    catch
+        % Catch the early return since we're bypassing the gen_server
+        throw:{stop, Error, _, _} ->
             Error
     end.
+
+cfile_skip_ioq() ->
+    config:get_boolean("couchdb", "cfile_skip_ioq", ?CFILE_SKIP_IOQ_DEFAULT).
 
 append_terms(Fd, Terms) ->
     append_terms(Fd, Terms, []).
@@ -221,7 +247,10 @@ append_terms(Fd, Terms, Options) ->
     ),
     append_binaries(Fd, Bins).
 
-append_binaries(Fd, Bins) ->
+append_raw_chunks(Fd, RawChunks) when is_list(RawChunks) ->
+    ioq:call(Fd, {append_bins, RawChunks}, erlang:get(io_priority)).
+
+append_binaries(Fd, Bins) when is_list(Bins) ->
     WriteBins = lists:map(fun assemble_file_chunk/1, Bins),
     ioq:call(Fd, {append_bins, WriteBins}, erlang:get(io_priority)).
 
@@ -231,9 +260,12 @@ append_binaries(Fd, Bins) ->
 %%  or {error, Reason}.
 %%----------------------------------------------------------------------
 
-% length in bytes
+% length in bytes.
 bytes(Fd) ->
-    gen_server:call(Fd, bytes, infinity).
+    case get_cfile(Fd) of
+        undefined -> gen_server:call(Fd, bytes, infinity);
+        #file{} = CFile -> eof(CFile)
+    end.
 
 %%----------------------------------------------------------------------
 %% Purpose: Truncate a file to the number of bytes.
@@ -258,20 +290,20 @@ sync(Filepath) when is_list(Filepath) ->
                     ok ->
                         ok;
                     {error, Reason} ->
-                        erlang:error({fsync_error, Reason})
+                        error({fsync_error, Reason})
                 end
             after
                 ok = file:close(Fd)
             end;
         {error, Error} ->
-            erlang:error(Error)
+            error(Error)
     end;
 sync(Fd) ->
     case gen_server:call(Fd, sync, infinity) of
         ok ->
             ok;
         {error, Reason} ->
-            erlang:error({fsync_error, Reason})
+            error({fsync_error, Reason})
     end.
 
 %%----------------------------------------------------------------------
@@ -378,9 +410,7 @@ delete_dir(RootDelDir, Dir) ->
 
 init_delete_dir(RootDir) ->
     Dir = filename:join(RootDir, ".delete"),
-    % note: ensure_dir requires an actual filename companent, which is the
-    % reason for "foo".
-    filelib:ensure_dir(filename:join(Dir, "foo")),
+    filelib:ensure_path(Dir),
     spawn(fun() ->
         filelib:fold_files(
             Dir,
@@ -403,27 +433,27 @@ read_header(Fd) ->
     end.
 
 write_header(Fd, Data) ->
+    write_header(Fd, Data, []).
+
+% Only the sync option is currently supported
+%
+write_header(Fd, Data, Opts) when is_list(Opts) ->
     Bin = ?term_to_bin(Data),
     Checksum = generate_checksum(Bin),
     % now we assemble the final header binary and write to disk
     FinalBin = <<Checksum/binary, Bin/binary>>,
-    ioq:call(Fd, {write_header, FinalBin}, erlang:get(io_priority)).
+    ioq:call(Fd, {write_header, FinalBin, Opts}, erlang:get(io_priority)).
 
 init_status_error(ReturnPid, Ref, Error) ->
     ReturnPid ! {Ref, self(), Error},
     ignore.
 
-last_read(Fd) when is_pid(Fd) ->
-    Now = os:timestamp(),
-    couch_util:process_dict_get(Fd, read_timestamp, Now).
-
 % server functions
 
 init({Filepath, Options, ReturnPid, Ref}) ->
     OpenOptions = file_open_options(Options),
-    Limit = get_pread_limit(),
     IsSys = lists:member(sys_db, Options),
-    update_read_timestamp(),
+    File = #file{filepath = Filepath, is_sys = IsSys},
     case lists:member(create, Options) of
         true ->
             filelib:ensure_dir(Filepath),
@@ -444,7 +474,7 @@ init({Filepath, Options, ReturnPid, Ref}) ->
                                     ok = fsync(Fd),
                                     maybe_track_open_os_files(Options),
                                     erlang:send_after(?INITIAL_WAIT, self(), maybe_close),
-                                    {ok, #file{fd = Fd, is_sys = IsSys, pread_limit = Limit}};
+                                    {ok, dup(File#file{fd = Fd})};
                                 false ->
                                     ok = file:close(Fd),
                                     init_status_error(ReturnPid, Ref, {error, eexist})
@@ -452,7 +482,7 @@ init({Filepath, Options, ReturnPid, Ref}) ->
                         false ->
                             maybe_track_open_os_files(Options),
                             erlang:send_after(?INITIAL_WAIT, self(), maybe_close),
-                            {ok, #file{fd = Fd, is_sys = IsSys, pread_limit = Limit}}
+                            {ok, dup(File#file{fd = Fd})}
                     end;
                 Error ->
                     init_status_error(ReturnPid, Ref, Error)
@@ -469,7 +499,7 @@ init({Filepath, Options, ReturnPid, Ref}) ->
                             maybe_track_open_os_files(Options),
                             {ok, Eof} = file:position(Fd, eof),
                             erlang:send_after(?INITIAL_WAIT, self(), maybe_close),
-                            {ok, #file{fd = Fd, eof = Eof, is_sys = IsSys, pread_limit = Limit}};
+                            {ok, dup(File#file{fd = Fd, eof = Eof})};
                         Error ->
                             init_status_error(ReturnPid, Ref, Error)
                     end;
@@ -500,56 +530,22 @@ terminate(_Reason, #file{fd = nil}) ->
 terminate(_Reason, #file{fd = Fd}) ->
     ok = file:close(Fd).
 
-handle_call(Msg, From, File) when ?IS_OLD_STATE(File) ->
-    handle_call(Msg, From, upgrade_state(File));
 handle_call(close, _From, #file{fd = Fd} = File) ->
     {stop, normal, file:close(Fd), File#file{fd = nil}};
 handle_call({pread_iolist, Pos}, _From, File) ->
-    update_read_timestamp(),
-    {LenIolist, NextPos} = read_raw_iolist_int(File, Pos, 4),
-    case iolist_to_binary(LenIolist) of
-        % an checksum-prefixed term
-        <<1:1/integer, Len:31/integer>> ->
-            {ChecksumAndIoList, _} = read_raw_iolist_int(File, NextPos, Len + 16),
-            {Checksum, IoList} = extract_checksum(ChecksumAndIoList),
-            {reply, {ok, IoList, Checksum}, File};
-        <<0:1/integer, Len:31/integer>> ->
-            {Iolist, _} = read_raw_iolist_int(File, NextPos, Len),
-            {reply, {ok, Iolist, <<>>}, File}
-    end;
+    % Compatibility clause. Remove after upgrading to next release after 3.5.0
+    % Attachment streams may be opened from remote nodes during the upgrade on
+    % a mixed cluster
+    Result =
+        case pread(File, [Pos]) of
+            {ok, [{IoList, Checksum}]} -> {ok, IoList, Checksum};
+            Error -> Error
+        end,
+    {reply, Result, File};
 handle_call({pread_iolists, PosL}, _From, File) ->
-    update_read_timestamp(),
-    LocNums1 = [{Pos, 4} || Pos <- PosL],
-    DataSizes = read_multi_raw_iolists_int(File, LocNums1),
-    LocNums2 = lists:map(
-        fun({LenIoList, NextPos}) ->
-            case iolist_to_binary(LenIoList) of
-                % a checksum-prefixed term
-                <<1:1/integer, Len:31/integer>> ->
-                    {NextPos, Len + 16};
-                <<0:1/integer, Len:31/integer>> ->
-                    {NextPos, Len}
-            end
-        end,
-        DataSizes
-    ),
-    Resps = read_multi_raw_iolists_int(File, LocNums2),
-    Extracted = lists:zipwith(
-        fun({LenIoList, _}, {IoList, _}) ->
-            case iolist_to_binary(LenIoList) of
-                <<1:1/integer, _:31/integer>> ->
-                    {Checksum, IoList} = extract_checksum(IoList),
-                    {IoList, Checksum};
-                <<0:1/integer, _:31/integer>> ->
-                    {IoList, <<>>}
-            end
-        end,
-        DataSizes,
-        Resps
-    ),
-    {reply, {ok, Extracted}, File};
-handle_call(bytes, _From, #file{fd = Fd} = File) ->
-    {reply, file:position(Fd, eof), File};
+    {reply, pread(File, PosL), File};
+handle_call(bytes, _From, #file{} = File) ->
+    {reply, eof(File), File};
 handle_call({set_db_pid, Pid}, _From, #file{db_monitor = OldRef} = File) ->
     case is_reference(OldRef) of
         true -> demonitor(OldRef, [flush]);
@@ -576,55 +572,41 @@ handle_call({truncate, Pos}, _From, #file{fd = Fd} = File) ->
         Error ->
             {reply, Error, File}
     end;
-handle_call({append_bin, Bin}, _From, #file{fd = Fd, eof = Pos} = File) ->
-    Blocks = make_blocks(Pos rem ?SIZE_BLOCK, Bin),
-    Size = iolist_size(Blocks),
-    case file:write(Fd, Blocks) of
-        ok ->
-            {reply, {ok, Pos, Size}, File#file{eof = Pos + Size}};
-        Error ->
-            {reply, Error, reset_eof(File)}
+handle_call({append_bin, Bin}, _From, #file{} = File) ->
+    % Compatibility clause. Remove after upgrading to next release after 3.5.0
+    % Attachment streams may be opened from remote nodes during the upgrade on
+    % a mixed cluster
+    case append_bins(File, [Bin]) of
+        {{ok, [{Pos, Len}]}, File1} -> {reply, {ok, Pos, Len}, File1};
+        {Error, File1} -> {reply, Error, File1}
     end;
-handle_call({append_bins, Bins}, _From, #file{fd = Fd, eof = Pos} = File) ->
-    {BlockResps, FinalPos} = lists:mapfoldl(
-        fun(Bin, PosAcc) ->
-            Blocks = make_blocks(PosAcc rem ?SIZE_BLOCK, Bin),
-            Size = iolist_size(Blocks),
-            {{Blocks, {PosAcc, Size}}, PosAcc + Size}
-        end,
-        Pos,
-        Bins
-    ),
-    {AllBlocks, Resps} = lists:unzip(BlockResps),
-    case file:write(Fd, AllBlocks) of
-        ok ->
-            {reply, {ok, Resps}, File#file{eof = FinalPos}};
-        Error ->
-            {reply, Error, reset_eof(File)}
+handle_call({append_bins, Bins}, _From, #file{} = File) ->
+    case append_bins(File, Bins) of
+        {{ok, Resps}, File1} -> {reply, {ok, Resps}, File1};
+        {Error, File1} -> {reply, Error, File1}
     end;
-handle_call({write_header, Bin}, _From, #file{fd = Fd, eof = Pos} = File) ->
-    BinSize = byte_size(Bin),
-    case Pos rem ?SIZE_BLOCK of
-        0 ->
-            Padding = <<>>;
-        BlockOffset ->
-            Padding = <<0:(8 * (?SIZE_BLOCK - BlockOffset))>>
-    end,
-    FinalBin = [Padding, <<1, BinSize:32/integer>> | make_blocks(5, [Bin])],
-    case file:write(Fd, FinalBin) of
-        ok ->
-            {reply, ok, File#file{eof = Pos + iolist_size(FinalBin)}};
-        Error ->
-            {reply, Error, reset_eof(File)}
+handle_call({write_header, Bin, Opts}, _From, #file{} = File) ->
+    try
+        ok = header_fsync(File, Opts),
+        case handle_write_header(Bin, File) of
+            {ok, NewFile} ->
+                ok = header_fsync(NewFile, Opts),
+                {reply, ok, NewFile};
+            {{error, Err}, NewFile} ->
+                {reply, {error, Err}, NewFile}
+        end
+    catch
+        error:{fsync_error, Error} ->
+            % If fsync error happens we stop. See comment in
+            % handle_call(sync, ...) why we're dropping the fd
+            {stop, {error, Error}, {error, Error}, #file{fd = nil}}
     end;
 handle_call(find_header, _From, #file{fd = Fd, eof = Pos} = File) ->
     {reply, find_header(Fd, Pos div ?SIZE_BLOCK), File}.
 
-handle_cast(close, Fd) ->
-    {stop, normal, Fd}.
+handle_cast(Msg, #file{} = File) ->
+    {stop, {invalid_cast, Msg}, File}.
 
-handle_info(Msg, File) when ?IS_OLD_STATE(File) ->
-    handle_info(Msg, upgrade_state(File));
 handle_info(maybe_close, File) ->
     case is_idle(File) of
         true ->
@@ -639,13 +621,65 @@ handle_info({'DOWN', Ref, process, _Pid, _Info}, #file{db_monitor = Ref} = File)
         false -> {noreply, File}
     end.
 
-format_status(_Opt, [PDict, #file{} = File]) ->
-    {_Fd, FilePath} = couch_util:get_value(couch_file_fd, PDict),
-    [{data, [{"State", File}, {"InitialFilePath", FilePath}]}].
+eof(#file{fd = Fd}) ->
+    file:position(Fd, eof).
+
+append_bins(#file{fd = Fd, eof = Pos} = File, Bins) ->
+    {BlockResps, FinalPos} = lists:mapfoldl(
+        fun(Bin, PosAcc) ->
+            Blocks = make_blocks(PosAcc rem ?SIZE_BLOCK, Bin),
+            Size = iolist_size(Blocks),
+            {{Blocks, {PosAcc, Size}}, PosAcc + Size}
+        end,
+        Pos,
+        Bins
+    ),
+    {AllBlocks, Resps} = lists:unzip(BlockResps),
+    case file:write(Fd, AllBlocks) of
+        ok -> {{ok, Resps}, File#file{eof = FinalPos}};
+        Error -> {Error, reset_eof(File)}
+    end.
+
+pread(#file{} = File, PosL) ->
+    LocNums1 = [{Pos, 4} || Pos <- PosL],
+    DataSizes = read_multi_raw_iolists_int(File, LocNums1),
+    MapFun = fun({LenIoList, NextPos}) ->
+        case iolist_to_binary(LenIoList) of
+            % a checksum-prefixed term
+            <<1:1/integer, Len:31/integer>> -> {NextPos, Len + 16};
+            <<0:1/integer, Len:31/integer>> -> {NextPos, Len}
+        end
+    end,
+    LocNums2 = lists:map(MapFun, DataSizes),
+    Resps = read_multi_raw_iolists_int(File, LocNums2),
+    ZipFun = fun({LenIoList, _}, {FullIoList, _}) ->
+        case iolist_to_binary(LenIoList) of
+            <<1:1/integer, _:31/integer>> -> extract_checksum(FullIoList);
+            <<0:1/integer, _:31/integer>> -> {FullIoList, <<>>}
+        end
+    end,
+    Extracted = lists:zipwith(ZipFun, DataSizes, Resps),
+    {ok, Extracted}.
+
+header_fsync(#file{fd = Fd}, Opts) when is_list(Opts) ->
+    case proplists:get_value(sync, Opts) of
+        true ->
+            case fsync(Fd) of
+                ok -> ok;
+                {error, Err} -> error({fsync_error, Err})
+            end;
+        _ ->
+            ok
+    end.
 
 fsync(Fd) ->
     T0 = erlang:monotonic_time(),
-    Res = file:sync(Fd),
+    % We do not rely on mtime/atime for our safety/consitency so we can use
+    % fdatasync. As of version 25 OTP will use:
+    %  - On Linux/BSDs: fdatasync()
+    %  - On Window: FlushFileBuffers() i.e. the same as for file:sync/1
+    %  - On MacOS: fcntl(fd,F_FULLFSYNC/F_BARRIERFSYNC)
+    Res = file:datasync(Fd),
     T1 = erlang:monotonic_time(),
     % Since histograms can consume floating point values we can measure in
     % nanoseconds, then turn it into floating point milliseconds
@@ -736,65 +770,61 @@ find_newest_header(Fd, [{Location, Size} | LocationSizes]) ->
             find_newest_header(Fd, LocationSizes)
     end.
 
--spec read_raw_iolist_int(#file{}, Pos :: non_neg_integer(), Len :: non_neg_integer()) ->
-    {Data :: iolist(), CurPos :: non_neg_integer()}.
-% 0110 UPGRADE CODE
-read_raw_iolist_int(Fd, {Pos, _Size}, Len) ->
-    read_raw_iolist_int(Fd, Pos, Len);
-read_raw_iolist_int(#file{fd = Fd} = File, Pos, Len) ->
-    {Pos, TotalBytes} = get_pread_locnum(File, Pos, Len),
-    case catch file:pread(Fd, Pos, TotalBytes) of
-        {ok, <<RawBin:TotalBytes/binary>>} ->
-            {remove_block_prefixes(Pos rem ?SIZE_BLOCK, RawBin), Pos + TotalBytes};
-        Else ->
-            % This clause matches when the file we are working with got truncated
-            % outside of CouchDB after we opened it. To find affected files, we
-            % need to log the file path.
-            %
-            % Technically, this should also go into read_multi_raw_iolists_int/2,
-            % but that doesn’t seem to be in use anywhere.
-            {_Fd, Filepath} = get(couch_file_fd),
-            throw({file_truncate_error, Else, Filepath})
+handle_write_header(Bin, #file{fd = Fd, eof = Pos} = File) ->
+    BinSize = byte_size(Bin),
+    case Pos rem ?SIZE_BLOCK of
+        0 -> Padding = <<>>;
+        BlockOffset -> Padding = <<0:(8 * (?SIZE_BLOCK - BlockOffset))>>
+    end,
+    FinalBin = [Padding, <<1, BinSize:32/integer>> | make_blocks(5, [Bin])],
+    case file:write(Fd, FinalBin) of
+        ok -> {ok, File#file{eof = Pos + iolist_size(FinalBin)}};
+        {error, Error} -> {{error, Error}, reset_eof(File)}
     end.
 
-% TODO: check if this is really unused
-read_multi_raw_iolists_int(#file{fd = Fd} = File, PosLens) ->
-    LocNums = lists:map(
-        fun({Pos, Len}) ->
-            get_pread_locnum(File, Pos, Len)
-        end,
-        PosLens
-    ),
-    {ok, Bins} = file:pread(Fd, LocNums),
-    lists:zipwith(
-        fun({Pos, TotalBytes}, Bin) ->
-            <<RawBin:TotalBytes/binary>> = Bin,
-            {remove_block_prefixes(Pos rem ?SIZE_BLOCK, RawBin), Pos + TotalBytes}
-        end,
-        LocNums,
-        Bins
-    ).
+read_multi_raw_iolists_int(#file{fd = Fd, eof = Eof} = File, PosLens) ->
+    MapFun = fun({Pos, Len}) -> get_pread_locnum(File, Pos, Len) end,
+    LocNums = lists:map(MapFun, PosLens),
+    ZipFun = fun({Pos, TotalBytes}, Bin) ->
+        case is_binary(Bin) andalso byte_size(Bin) == TotalBytes of
+            true ->
+                {remove_block_prefixes(Pos rem ?SIZE_BLOCK, Bin), Pos + TotalBytes};
+            false ->
+                couch_stats:increment_counter([pread, exceed_eof]),
+                {ok, CurEof} = file:position(File#file.fd, eof),
+                Filepath = File#file.filepath,
+                throw_stop({read_beyond_eof, Filepath, Pos, TotalBytes, Eof, CurEof}, File)
+        end
+    end,
+    case file:pread(Fd, LocNums) of
+        {ok, Bins} ->
+            lists:zipwith(ZipFun, LocNums, Bins);
+        {error, Error} ->
+            Filepath = File#file.filepath,
+            throw_stop({pread, Filepath, Error, hd(LocNums)}, File)
+    end.
 
-get_pread_locnum(File, Pos, Len) ->
+get_pread_locnum(#file{eof = Eof} = File, Pos, Len) ->
     BlockOffset = Pos rem ?SIZE_BLOCK,
     TotalBytes = calculate_total_read_len(BlockOffset, Len),
     case Pos + TotalBytes of
-        Size when Size > File#file.eof ->
+        Size when Size > Eof ->
             couch_stats:increment_counter([pread, exceed_eof]),
-            {_Fd, Filepath} = get(couch_file_fd),
-            throw({read_beyond_eof, Filepath});
-        Size when Size > File#file.pread_limit ->
-            couch_stats:increment_counter([pread, exceed_limit]),
-            {_Fd, Filepath} = get(couch_file_fd),
-            throw({exceed_pread_limit, Filepath, File#file.pread_limit});
+            {ok, CurEof} = file:position(File#file.fd, eof),
+            Filepath = File#file.filepath,
+            throw_stop({read_beyond_eof, Filepath, Pos, TotalBytes, Eof, CurEof}, File);
         _ ->
             {Pos, TotalBytes}
     end.
 
--spec extract_checksum(iolist()) -> {binary(), iolist()}.
+throw_stop(Error, #file{} = File) ->
+    % This follows the gen_server reply via a throw pattern
+    throw({stop, {error, Error}, {error, Error}, File}).
+
+-spec extract_checksum(iolist()) -> {iolist(), binary()}.
 extract_checksum(FullIoList) ->
     {ChecksumList, IoList} = split_iolist(FullIoList, 16, []),
-    {iolist_to_binary(ChecksumList), IoList}.
+    {IoList, iolist_to_binary(ChecksumList)}.
 
 calculate_total_read_len(0, FinalLen) ->
     calculate_total_read_len(1, FinalLen) + 1;
@@ -864,9 +894,9 @@ monitored_by_pids() ->
     {monitored_by, PidsAndRefs} = process_info(self(), monitored_by),
     lists:filter(fun is_pid/1, PidsAndRefs).
 
-verify_checksum(_Fd, _Pos, IoList, <<>>, _IsHeader) ->
-    IoList;
-verify_checksum(Fd, Pos, IoList, Checksum, IsHeader) ->
+verify_checksum(_Fd, _Pos, <<Bin/binary>>, <<>>, _IsHeader) ->
+    Bin;
+verify_checksum(Fd, Pos, <<Bin/binary>>, Checksum, IsHeader) ->
     % If writing xxhash checksums is enabled, check those first, then check
     % legacy ones. If any legacy ones are found, bump the legacy metric. If
     % generating xxhash checksums is disabled, assume most checksums would be
@@ -874,26 +904,26 @@ verify_checksum(Fd, Pos, IoList, Checksum, IsHeader) ->
     % downgrade, check xxhash ones.
     case generate_xxhash_checksums() of
         true ->
-            case exxhash:xxhash128(iolist_to_binary(IoList)) of
+            case exxhash:xxhash128(Bin) of
                 Checksum ->
-                    IoList;
+                    Bin;
                 <<_/binary>> ->
-                    case couch_hash:md5_hash(IoList) of
+                    case couch_hash:md5_hash(Bin) of
                         Checksum ->
                             legacy_checksums_stats_update(),
-                            IoList;
+                            Bin;
                         _ ->
                             report_checksum_error(Fd, Pos, IsHeader)
                     end
             end;
         false ->
-            case couch_hash:md5_hash(IoList) of
+            case couch_hash:md5_hash(Bin) of
                 Checksum ->
-                    IoList;
+                    Bin;
                 _ ->
-                    case exxhash:xxhash128(iolist_to_binary(IoList)) of
+                    case exxhash:xxhash128(Bin) of
                         Checksum ->
-                            IoList;
+                            Bin;
                         <<_/binary>> ->
                             report_checksum_error(Fd, Pos, IsHeader)
                     end
@@ -929,22 +959,6 @@ is_idle(#file{is_sys = false}) ->
 process_info(Pid) ->
     couch_util:process_dict_get(Pid, couch_file_fd).
 
-update_read_timestamp() ->
-    put(read_timestamp, os:timestamp()).
-
-upgrade_state(#file{db_monitor = DbPid} = File) when is_pid(DbPid) ->
-    unlink(DbPid),
-    Ref = monitor(process, DbPid),
-    File#file{db_monitor = Ref};
-upgrade_state(State) ->
-    State.
-
-get_pread_limit() ->
-    case config:get_integer("couchdb", "max_pread_size", 0) of
-        N when N > 0 -> N;
-        _ -> infinity
-    end.
-
 %% in event of a partially successful write.
 reset_eof(#file{} = File) ->
     {ok, Eof} = file:position(File#file.fd, eof),
@@ -964,21 +978,52 @@ legacy_checksums_stats_update() ->
         false -> ok
     end.
 
-reset_checksum_persistent_term_config() ->
-    persistent_term:erase(?WRITE_XXHASH_CHECKSUMS_KEY).
-
 generate_xxhash_checksums() ->
-    % Caching the config value here as we'd need to call this per file chunk
-    % and also from various processes (not just couch_file pids). Node must be
-    % restarted for the new value to take effect.
-    case persistent_term:get(?WRITE_XXHASH_CHECKSUMS_KEY, not_cached) of
-        not_cached ->
-            Default = ?WRITE_XXHASH_CHECKSUMS_DEFAULT,
-            Val = config:get_boolean("couchdb", "write_xxhash_checksums", Default),
-            persistent_term:put(?WRITE_XXHASH_CHECKSUMS_KEY, Val),
-            Val;
-        Val when is_boolean(Val) ->
-            Val
+    Default = ?WRITE_XXHASH_CHECKSUMS_DEFAULT,
+    config:get_boolean("couchdb", "write_xxhash_checksums", Default).
+
+% couch_cfile handling
+%
+
+get_cfile(Pid) when is_pid(Pid) ->
+    % Pids could be remote when processing attachments and is_process_alive/1
+    % will throw an error then, so ensure a fallback for non-local processes
+    PidAliveAndLocal = node(Pid) =:= node() andalso is_process_alive(Pid),
+    case {PidAliveAndLocal, get(?CFILE_HANDLE)} of
+        {false, _} ->
+            erase(?CFILE_HANDLE),
+            undefined;
+        {true, {Pid, #file{} = CFile}} ->
+            CFile;
+        {true, _} ->
+            % Maybe use an ets table as this is still a signal send/recv
+            case couch_util:process_dict_get(Pid, ?CFILE_HANDLE) of
+                #file{} = CFile ->
+                    put(?CFILE_HANDLE, {Pid, CFile}),
+                    CFile;
+                undefined ->
+                    undefined
+            end
+    end.
+
+dup(#file{fd = Fd} = File) ->
+    case config:get_boolean("couchdb", "use_cfile", ?USE_CFILE_DEFAULT) of
+        true ->
+            case couch_cfile:dup(Fd) of
+                {ok, CFd} ->
+                    % Successfully opened a couch_cfile handle, close
+                    % the original one to free the fd
+                    ok = file:close(Fd),
+                    CFile = File#file{fd = CFd},
+                    put(couch_file_fd, {CFd, CFile#file.filepath}),
+                    % Use an effective infinity for eof max limit for now
+                    put(?CFILE_HANDLE, CFile#file{eof = 1 bsl 60}),
+                    CFile;
+                {error, _Error} ->
+                    File
+            end;
+        false ->
+            File
     end.
 
 -ifdef(TEST).

@@ -279,8 +279,7 @@ close_db_if_idle(DbName) ->
     end.
 
 init([N]) ->
-    couch_util:set_mqd_off_heap(?MODULE),
-    couch_util:set_process_priority(?MODULE, high),
+    erlang:process_flag(message_queue_data, off_heap),
 
     % Mark pluggable storage engines as a supported feature
     config:enable_feature('pluggable-storage-engines'),
@@ -303,7 +302,12 @@ init([N]) ->
         "couchdb", "update_lru_on_read", false
     ),
     ok = config:listen_for_changes(?MODULE, N),
-    ok = couch_file:init_delete_dir(RootDir),
+    % Spawn async .deleted files recursive cleaner, but only
+    % for the first sharded couch_server instance
+    case N of
+        1 -> ok = couch_file:init_delete_dir(RootDir);
+        _ -> ok
+    end,
     ets:new(couch_dbs(N), [
         set,
         protected,
@@ -400,7 +404,7 @@ handle_config_terminate(_Server, _Reason, N) ->
     erlang:send_after(?RELISTEN_DELAY, whereis(?MODULE), {restart_config_listener, N}).
 
 per_couch_server(X) ->
-    erlang:max(1, X div num_servers()).
+    max(1, X div num_servers()).
 
 all_databases() ->
     {ok, DbList} = all_databases(
@@ -858,7 +862,7 @@ get_engine(Server, DbName) ->
         [Engine] ->
             {ok, Engine};
         _ ->
-            erlang:error(engine_conflict)
+            error(engine_conflict)
     end.
 
 get_possible_engines(DbName, RootDir, Engines) ->

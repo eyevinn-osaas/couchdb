@@ -94,8 +94,15 @@
     :query number limit: Limit number of result rows to the specified value
         (note that using ``0`` here has the same effect as ``1``).
     :query since: Start the results from the change immediately after the given
-        update sequence. Can be valid update sequence or ``now`` value.
-        Default is ``0``.
+        update sequence. Default is ``0``. Other values can be:
+
+        - A valid update sequence, for example, from a ``_changes`` feed response.
+        - ``now``
+        - ``0``
+        - A timestmap string matching the ``YYYY-MM-DDTHH:MM:SSZ``
+          format. The results returned will depend on the time-sequence
+          intervals recorded by the time-seq data structure. To inspect or reset
+          it use the :ref:`_time_seq <api/db/time_seq>` endpoint.
     :query string style: Specifies how many revisions are returned in the
         changes array. The default, ``main_only``, will only return the current
         "winning" revision; ``all_docs`` will return all leaf revisions
@@ -108,8 +115,9 @@
         the filtering criteria.
     :query number timeout: Maximum period in *milliseconds* to wait for a change
         before the response is sent, even if there are no results.
-        Only applicable for :ref:`longpoll <changes/longpoll>` or
-        :ref:`continuous <changes/continuous>` feeds.
+        Only applicable for :ref:`longpoll <changes/longpoll>`,
+        :ref:`continuous <changes/continuous>` or
+        :ref:`eventsource <changes/eventsource>` feeds.
         Default value is specified by :config:option:`chttpd/changes_timeout`
         configuration option. Note that ``60000`` value is also the default
         maximum timeout to prevent undetected dead connections.
@@ -136,6 +144,8 @@
     :>json array results: Changes made to a database
     :code 200: Request completed successfully
     :code 400: Bad request
+    :code 401: Unauthorized request to a protected API
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     The ``results`` field of database changes:
 
@@ -779,14 +789,14 @@ amount of duplicated code.
     they are ready to handle documents with *alien* structure without panic.
 
 .. note::
-    Using ``_view`` filter doesn't queries the view index files, so you cannot
+    Using ``_view`` filter doesn't query the view index files, so you cannot
     use common :ref:`view query parameters <api/ddoc/view>` to additionally
     filter the changes feed by index key. Also, CouchDB doesn't returns
     the result instantly as it does for views - it really uses the specified
     map function as filter.
 
     Moreover, you cannot make such filters dynamic e.g. process the request
-    query parameters or handle the :ref:`userctx_object` - the map function is
+    query parameters or handle the :ref:`userctx_object` - the map function
     only operates with the document.
 
 **Request**:

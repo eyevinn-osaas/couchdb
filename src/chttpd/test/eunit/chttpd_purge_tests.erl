@@ -49,7 +49,6 @@ purge_test_() ->
                     ?TDEF_FE(t_purge_only_post_allowed),
                     ?TDEF_FE(t_empty_purge_request),
                     ?TDEF_FE(t_ok_purge_request),
-                    ?TDEF_FE(t_ok_purge_with_max_document_id_number),
                     ?TDEF_FE(t_accepted_purge_request),
                     ?TDEF_FE(t_partial_purge_request),
                     ?TDEF_FE(t_mixed_purge_request),
@@ -61,7 +60,8 @@ purge_test_() ->
                     ?TDEF_FE(t_purged_infos_only_get_allowed),
                     ?TDEF_FE(t_empty_purged_infos),
                     ?TDEF_FE(t_purged_infos_after_purge_request),
-                    ?TDEF_FE(t_purged_infos_after_multiple_purge_requests)
+                    ?TDEF_FE(t_purged_infos_after_multiple_purge_requests),
+                    ?TDEF_FE(t_purged_infos_after_exceeding_purge_infos_limit, 10)
                 ]
             }
         }
@@ -83,23 +83,6 @@ t_ok_purge_request(DbUrl) ->
     {Status, Response2} = req(post, url(DbUrl, "_purge"), IdsRevs),
     ?assertMatch(#{<<"purge_seq">> := null, <<"purged">> := IdsRevs}, Response2),
     ?assert(Status =:= 201 orelse Status =:= 202).
-
-t_ok_purge_with_max_document_id_number(DbUrl) ->
-    PurgedDocsNum = 101,
-    {201, Response1} = create_docs(DbUrl, docs(PurgedDocsNum)),
-    IdsRevs = ids_revs(Response1),
-
-    {400, #{<<"reason">> := Error}} = req(post, url(DbUrl, "_purge"), IdsRevs),
-    ?assertEqual(<<"Exceeded maximum number of documents.">>, Error),
-
-    ok = config:set("purge", "max_document_id_number", "101", _Persist = false),
-    try
-        {Status, Response2} = req(post, url(DbUrl, "_purge"), IdsRevs),
-        ?assertMatch(#{<<"purge_seq">> := null, <<"purged">> := IdsRevs}, Response2),
-        ?assert(Status =:= 201 orelse Status =:= 202)
-    after
-        ok = config:delete("purge", "max_document_id_number", _Persist)
-    end.
 
 t_accepted_purge_request(DbUrl) ->
     try
@@ -172,24 +155,14 @@ t_over_many_ids_or_revs_purge_request(DbUrl) ->
         <<"doc3">> => [Rev3]
     },
 
-    % Ids larger than expected
-    config:set("purge", "max_document_id_number", "1", _Persist = false),
-    try
-        {Status1, #{<<"reason">> := Error1}} = req(post, url(DbUrl, "_purge"), IdsRevs),
-        ?assertEqual(<<"Exceeded maximum number of documents.">>, Error1),
-        ?assertEqual(400, Status1)
-    after
-        config:delete("purge", "max_document_id_number", _Persist)
-    end,
-
     % Revs larger than expected
-    config:set("purge", "max_revisions_number", "1", _Persist),
+    config:set("purge", "max_revisions_number", "1", false),
     try
         {Status2, #{<<"reason">> := Error2}} = req(post, url(DbUrl, "_purge"), IdsRevs),
         ?assertEqual(<<"Exceeded maximum number of revisions.">>, Error2),
         ?assertEqual(400, Status2)
     after
-        config:delete("purge", "max_revisions_number", _Persist)
+        config:delete("purge", "max_revisions_number", false)
     end.
 
 t_purged_infos_limit_only_get_put_allowed(DbUrl) ->
@@ -234,7 +207,7 @@ t_purged_infos_only_get_allowed(DbUrl) ->
     ?assert(Status =:= 405).
 
 t_empty_purged_infos(DbUrl) ->
-    {Status, Response} = req(get, url(DbUrl, "_purged_infos")),
+    {Status, Response} = purged_infos(DbUrl),
     ?assertMatch(#{<<"purged_infos">> := []}, Response),
     ?assert(Status =:= 200).
 
@@ -248,7 +221,7 @@ t_purged_infos_after_purge_request(DbUrl) ->
     ?assert(Status2 =:= 201 orelse Status2 =:= 202),
     ?assertMatch(#{<<"purge_seq">> := null, <<"purged">> := IdsRevs}, Response2),
 
-    {Status3, Response3} = req(get, url(DbUrl, "_purged_infos")),
+    {Status3, Response3} = purged_infos(DbUrl),
     ?assert(Status3 =:= 200),
     ?assertMatch(#{<<"purged_infos">> := [_ | _]}, Response3),
     Info = maps:get(<<"purged_infos">>, Response3),
@@ -262,18 +235,40 @@ t_purged_infos_after_multiple_purge_requests(DbUrl) ->
     req(post, url(DbUrl, "_purge"), Doc1IdRevs),
     req(post, url(DbUrl, "_purge"), Doc2IdRevs),
     req(post, url(DbUrl, "_purge"), #{<<"doc1">> => [Rev1New]}),
-    {Status, #{<<"purged_infos">> := IdRevsList}} = req(get, url(DbUrl, "_purged_infos")),
+    {Status, #{<<"purged_infos">> := IdRevsList}} = purged_infos(DbUrl),
     ?assert(lists:member(#{<<"id">> => <<"doc1">>, <<"revs">> => [Rev1]}, IdRevsList)),
     ?assert(lists:member(#{<<"id">> => <<"doc1">>, <<"revs">> => [Rev1New]}, IdRevsList)),
     ?assert(lists:member(#{<<"id">> => <<"doc2">>, <<"revs">> => [Rev2]}, IdRevsList)),
     ?assert(Status =:= 200).
+
+t_purged_infos_after_exceeding_purge_infos_limit(DbUrl) ->
+    {_, Doc1IdRevs} = get_id_rev_map(DbUrl, "doc1"),
+    {Rev2, Doc2IdRevs} = get_id_rev_map(DbUrl, "doc2"),
+    {Rev3, Doc3IdRevs} = get_id_rev_map(DbUrl, "doc3"),
+    {201, _} = req(post, url(DbUrl, "_purge"), Doc1IdRevs),
+    {201, _} = req(post, url(DbUrl, "_purge"), Doc2IdRevs),
+    {201, _} = req(post, url(DbUrl, "_purge"), Doc3IdRevs),
+    {200, _} = req(put, url(DbUrl, "_purged_infos_limit"), "2"),
+    {202, _} = req(post, url(DbUrl, "_compact"), #{}),
+    test_util:wait(fun() ->
+        {_, #{<<"purged_infos">> := Infos}} = purged_infos(DbUrl),
+        case length(Infos) > 2 of
+            true -> wait;
+            false -> ok
+        end
+    end),
+    {Status, #{<<"purged_infos">> := Infos}} = purged_infos(DbUrl),
+    ?assert(Status =:= 200),
+    ?assertEqual(2, length(Infos)),
+    ?assert(lists:member(#{<<"id">> => <<"doc2">>, <<"revs">> => [Rev2]}, Infos)),
+    ?assert(lists:member(#{<<"id">> => <<"doc3">>, <<"revs">> => [Rev3]}, Infos)).
 
 %%%%%%%%%%%%%%%%%%%% Utility Functions %%%%%%%%%%%%%%%%%%%%
 url(Url, Path) ->
     Url ++ "/" ++ Path.
 
 create_db(Url) ->
-    case req(put, Url) of
+    case req(put, Url ++ "?q=1&n=1") of
         {201, #{}} -> ok;
         Error -> error({failed_to_create_test_db, Error})
     end.
@@ -293,7 +288,7 @@ create_docs(Url, Docs) ->
 docs(Counter) ->
     lists:foldl(
         fun(I, Acc) ->
-            Id = ?l2b(integer_to_list(I)),
+            Id = integer_to_binary(I),
             Doc = #{<<"_id">> => Id, <<"val">> => I},
             [Doc | Acc]
         end,
@@ -337,6 +332,9 @@ new_doc(Rev) ->
             }
         ]
     }.
+
+purged_infos(DbUrl) ->
+    req(get, url(DbUrl, "_purged_infos")).
 
 req(Method, Url) ->
     Headers = [?CONTENT_JSON, ?AUTH],

@@ -14,7 +14,6 @@
 
 -export([go/2]).
 
--include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
 
@@ -26,7 +25,7 @@ go(DbName, #doc{id = DDocId}) ->
     Ushards = mem3:ushards(DbName),
     Workers = fabric_util:submit_jobs(Shards, group_info, [DDocId]),
     RexiMon = fabric_util:create_monitors(Shards),
-    USet = sets:from_list([{Id, N} || #shard{name = Id, node = N} <- Ushards]),
+    USet = couch_util:set_from_list([{Id, N} || #shard{name = Id, node = N} <- Ushards]),
     Acc = {fabric_dict:init(Workers, nil), [], USet},
     try fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc) of
         {timeout, {WorkersDict, _, _}} ->

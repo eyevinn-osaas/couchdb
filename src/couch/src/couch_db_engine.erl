@@ -180,14 +180,6 @@
 -callback decref(DbHandle :: db_handle()) -> ok.
 -callback monitored_by(DbHande :: db_handle()) -> [pid()].
 
-% This is called in the context of couch_db_updater:handle_info/2
-% and should return the timestamp of the last activity of
-% the database. If a storage has no notion of activity or the
-% value would be hard to report its ok to just return the
-% result of os:timestamp/0 as this will just disable idle
-% databases from automatically closing.
--callback last_activity(DbHandle :: db_handle()) -> erlang:timestamp().
-
 % All of the get_* functions may be called from many
 % processes concurrently.
 
@@ -239,6 +231,11 @@
 
 % Get the current properties.
 -callback get_props(DbHandle :: db_handle()) -> Props :: [any()].
+
+% Return the couch_time_seq structure. That is a small, fixed size,
+% exponentially decaying set of time bins, mapping rough time intervals to db
+% update sequences. Use couch_time_seq to access and update the data structure.
+-callback get_time_seq(DbHandle :: db_handle()) -> TimeSeq :: any().
 
 % This information is displayed in the database info poperties. It
 % should just be a list of {Name::atom(), Size::non_neg_integer()}
@@ -296,6 +293,14 @@
 % unaltered.
 
 -callback set_props(DbHandle :: db_handle(), Props :: any()) ->
+    {ok, NewDbHandle :: db_handle()}.
+
+% This function is only called by couch_db_updater and couch_db_split, and so
+% is guaranteed to be processed sequentially (or "single threaded" as mentioned
+% in other API comments in this module). The database should simply store
+% provided TimeSeq struct in file and reference it in the header somewhere.
+
+-callback set_time_seq(DbHandle :: db_handle(), TimeSeq :: any()) ->
     {ok, NewDbHandle :: db_handle()}.
 
 % Set the current update sequence of the database. The intention is to use this
@@ -673,8 +678,6 @@
     decref/1,
     monitored_by/1,
 
-    last_activity/1,
-
     get_engine/1,
     get_compacted_seq/1,
     get_del_doc_count/1,
@@ -687,6 +690,7 @@
     get_revs_limit/1,
     get_security/1,
     get_props/1,
+    get_time_seq/1,
     get_size_info/1,
     get_partition_info/2,
     get_update_seq/1,
@@ -696,6 +700,7 @@
     set_security/2,
     set_purge_infos_limit/2,
     set_props/2,
+    set_time_seq/2,
 
     set_update_seq/2,
 
@@ -791,10 +796,6 @@ monitored_by(#db{} = Db) ->
     #db{engine = {Engine, EngineState}} = Db,
     Engine:monitored_by(EngineState).
 
-last_activity(#db{} = Db) ->
-    #db{engine = {Engine, EngineState}} = Db,
-    Engine:last_activity(EngineState).
-
 get_engine(#db{} = Db) ->
     #db{engine = {Engine, _}} = Db,
     Engine.
@@ -834,6 +835,10 @@ get_purge_infos_limit(#db{} = Db) ->
 get_revs_limit(#db{} = Db) ->
     #db{engine = {Engine, EngineState}} = Db,
     Engine:get_revs_limit(EngineState).
+
+get_time_seq(#db{} = Db) ->
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:get_time_seq(EngineState).
 
 get_security(#db{} = Db) ->
     #db{engine = {Engine, EngineState}} = Db,
@@ -877,6 +882,11 @@ set_security(#db{} = Db, SecProps) ->
 set_props(#db{} = Db, Props) ->
     #db{engine = {Engine, EngineState}} = Db,
     {ok, NewSt} = Engine:set_props(EngineState, Props),
+    {ok, Db#db{engine = {Engine, NewSt}}}.
+
+set_time_seq(#db{} = Db, TimeSeq) ->
+    #db{engine = {Engine, EngineState}} = Db,
+    {ok, NewSt} = Engine:set_time_seq(EngineState, TimeSeq),
     {ok, Db#db{engine = {Engine, NewSt}}}.
 
 set_update_seq(#db{} = Db, UpdateSeq) ->

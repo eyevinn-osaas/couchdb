@@ -25,6 +25,8 @@
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("couch_mrview/include/couch_mrview.hrl").
 
+-define(MAX_RANK, 100).
+
 -record(mracc, {
     db,
     meta_sent = false,
@@ -181,7 +183,7 @@ map_function_type({Props}) ->
     end.
 
 format_type(Type) when is_atom(Type) ->
-    ?l2b(atom_to_list(Type));
+    atom_to_binary(Type);
 format_type(Types) when is_list(Types) ->
     iolist_to_binary(join(lists:map(fun atom_to_list/1, Types), <<" or ">>)).
 
@@ -210,6 +212,14 @@ validate(Db, DDoc) ->
                 ({_RedName, <<"_stats", _/binary>>}) ->
                     ok;
                 ({_RedName, <<"_approx_count_distinct", _/binary>>}) ->
+                    ok;
+                ({_RedName, <<"_top_", N/binary>>}) ->
+                    ok = check_rank(N);
+                ({_RedName, <<"_bottom_", N/binary>>}) ->
+                    ok = check_rank(N);
+                ({_RedName, <<"_first", _/binary>>}) ->
+                    ok;
+                ({_RedName, <<"_last", _/binary>>}) ->
                     ok;
                 ({_RedName, <<"_", _/binary>> = Bad}) ->
                     Msg = ["`", Bad, "` is not a supported reduce function."],
@@ -253,17 +263,39 @@ validate(Db, DDoc) ->
             ok
     end.
 
+check_rank(<<N/binary>>) ->
+    try binary_to_integer(N) of
+        Val when Val >= 1 andalso Val =< ?MAX_RANK ->
+            ok;
+        _ ->
+            Msg = ["rank value must be between 1 and ", integer_to_list(?MAX_RANK)],
+            throw({invalid_design_doc, Msg})
+    catch
+        error:badarg ->
+            throw({invalid_design_doc, "invalid rank reducer"})
+    end.
+
 query_all_docs(Db, Args) ->
     query_all_docs(Db, Args, fun default_cb/2, []).
 
 query_all_docs(Db, Args, Callback, Acc) when is_list(Args) ->
-    query_all_docs(Db, to_mrargs(Args), Callback, Acc);
+    Args1 = couch_mrview_util:validate_all_docs_args(Db, to_mrargs(Args)),
+    query_all_docs(Db, Args1, Callback, Acc);
 query_all_docs(Db, Args0, Callback, Acc) ->
     Sig = couch_util:with_db(Db, fun(WDb) ->
         {ok, Info} = couch_db:get_db_info(WDb),
         couch_index_util:hexsig(couch_hash:md5_hash(?term_to_bin(Info)))
     end),
     Args1 = Args0#mrargs{view_type = map},
+
+    % TODO: Compatibility clause. Remove after upgrading to next minor release
+    % after 3.5.0.
+    %
+    % As of commit 7aa8a4, args are validated in fabric. However, during online
+    % cluster upgrades, old nodes will still expect args to be validated on
+    % workers, so keep the clause around until the next minor version then
+    % remove.
+    %
     Args2 = couch_mrview_util:validate_all_docs_args(Db, Args1),
     {ok, Acc1} =
         case Args2#mrargs.preflight_fun of
@@ -306,7 +338,7 @@ query_view(Db, {Type, View, Ref}, Args, Callback, Acc) ->
             red -> red_fold(Db, View, Args, Callback, Acc)
         end
     after
-        erlang:demonitor(Ref, [flush])
+        demonitor(Ref, [flush])
     end.
 
 get_info(Db, DDoc) ->

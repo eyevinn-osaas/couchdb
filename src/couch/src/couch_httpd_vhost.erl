@@ -25,8 +25,6 @@
 % config_listener api
 -export([handle_config_change/5, handle_config_terminate/3]).
 
--include_lib("couch/include/couch_db.hrl").
-
 -define(SEPARATOR, $\/).
 -define(MATCH_ALL, {bind, '*'}).
 -define(RELISTEN_DELAY, 5000).
@@ -329,7 +327,7 @@ split_host_port(HostAsString) ->
         N ->
             HostPart = string:substr(HostAsString, 1, N - 1),
             case
-                (catch erlang:list_to_integer(
+                (catch list_to_integer(
                     string:substr(
                         HostAsString,
                         N + 1,

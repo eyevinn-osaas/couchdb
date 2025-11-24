@@ -178,6 +178,10 @@ config_get_test_() ->
                 fun should_return_undefined_atom_on_missed_option/0,
                 fun should_return_custom_default_value_on_missed_option/0,
                 fun should_only_return_default_on_missed_option/0,
+                fun should_get_integers/0,
+                fun should_get_floats/0,
+                fun should_get_booleans/0,
+                fun should_crash_on_bad_defaults/0,
                 fun should_fail_to_get_binary_value/0,
                 fun should_return_any_supported_default/0
             ]
@@ -384,7 +388,20 @@ should_handle_regex_patterns_in_key() ->
     ?assertEqual([{"pat||*", "true"}], config:get("sect1")).
 
 should_delete_config_from_file() ->
-    ?assertEqual(ok, config:delete("admins", "foo", true)).
+    ?assertEqual(ok, config:delete("admins", "foo", true)),
+    ?assertEqual(ok, config:set("admins", "foo", "600", "reasons")),
+    ?assertEqual(ok, config:set_boolean("admins", "bool", true)),
+    ?assertEqual(ok, config:set_integer("admins", "int", 42)),
+    ?assertEqual(ok, config:set_float("admins", "float", 1.5)),
+    ?assertEqual("600", config:get("admins", "foo")),
+    ?assertEqual(ok, config:delete(<<"admins">>, <<"foo">>, "reasons")),
+    ?assertEqual(ok, config:delete("admins", "bool")),
+    ?assertEqual(ok, config:delete("admins", "int")),
+    ?assertEqual(ok, config:delete(<<"admins">>, <<"float">>)),
+    ?assertEqual(undefined, config:get("admins", "foo")),
+    ?assertEqual(undefined, config:get("admins", "bool")),
+    ?assertEqual(undefined, config:get("admins", "int")),
+    ?assertEqual(undefined, config:get("admins", "float")).
 
 should_not_write_config_to_file() ->
     meck:new(config_writer),
@@ -412,6 +429,103 @@ should_return_custom_default_value_on_missed_option() ->
 
 should_only_return_default_on_missed_option() ->
     ?assertEqual("0", config:get("httpd", "port", "bar")).
+
+should_get_integers() ->
+    config:set("integers", "key", "0", false),
+    ?assertEqual(0, config:get_integer("integers", "key", 42)),
+
+    config:set("integers", "key", "0000", false),
+    ?assertEqual(0, config:get_integer("integers", "key", 42)),
+
+    config:set("integers", "key", "-1", false),
+    ?assertEqual(-1, config:get_integer("integers", "key", 42)),
+
+    config:set("integers", "key", "1", false),
+    ?assertEqual(1, config:get_integer("integers", "key", 42)),
+
+    config:set("integers", "key", "0.1", false),
+    ?assertEqual(42, config:get_integer("integers", "key", 42)),
+
+    config:set("integers", "key", "true", false),
+    ?assertEqual(42, config:get_integer("integers", "key", 42)),
+
+    config:set("integers", "key", "potato", false),
+    ?assertEqual(42, config:get_integer("integers", "key", 42)),
+
+    config:set_integer("integers", "key", 10, false),
+    ?assertEqual(10, config:get_integer("integers", "key", 42)),
+
+    ?assertError(badarg, config:set_integer("integers", "key", "10", false)),
+    ?assertError(badarg, config:set_integer("integers", "key", true, false)),
+    ?assertError(badarg, config:set_integer("integers", "key", 4.2, false)),
+    ?assertEqual(42, config:get_integer("integers", "missing_key", 42)),
+
+    config:delete("integers", "key", false).
+
+should_get_floats() ->
+    config:set("floats", "key", "0.0", false),
+    ?assertEqual(0.0, config:get_float("floats", "key", 4.2)),
+
+    config:set("floats", "key", "00.00", false),
+    ?assertEqual(0.0, config:get_float("floats", "key", 4.2)),
+
+    config:set("floats", "key", "1.0", false),
+    ?assertEqual(1.0, config:get_float("floats", "key", 4.2)),
+
+    config:set("floats", "key", "-1.0", false),
+    ?assertEqual(-1.0, config:get_float("floats", "key", 4.2)),
+
+    config:set("floats", "key", "0.1", false),
+    ?assertEqual(0.1, config:get_float("floats", "key", 4.2)),
+
+    config:set("floats", "key", "true", false),
+    ?assertEqual(4.2, config:get_float("floats", "key", 4.2)),
+
+    config:set("floats", "key", "potato", false),
+    ?assertEqual(4.2, config:get_float("floats", "key", 4.2)),
+
+    config:set_float("floats", "key", 1.5, false),
+    ?assertEqual(1.5, config:get_float("floats", "key", 4.2)),
+
+    ?assertError(badarg, config:set_float("floats", "key", 1, false)),
+    ?assertError(badarg, config:set_float("floats", "key", "potato", false)),
+
+    ?assertEqual(1.5, config:get_float("floats", "missing_key", 1.5)),
+
+    config:delete("floats", "key", false).
+
+should_get_booleans() ->
+    config:set("booleans", "key", "true", false),
+    ?assertEqual(true, config:get_boolean("booleans", "key", false)),
+
+    config:set("booleans", "key", "false", false),
+    ?assertEqual(false, config:get_boolean("booleans", "key", true)),
+
+    config:set("booleans", "key", "1", false),
+    ?assertEqual(true, config:get_boolean("booleans", "key", true)),
+    ?assertEqual(false, config:get_boolean("booleans", "key", false)),
+
+    config:set("booleans", "key", "potato", false),
+    ?assertEqual(true, config:get_boolean("booleans", "key", true)),
+    ?assertEqual(false, config:get_boolean("booleans", "key", false)),
+
+    config:set_boolean("booleans", "key", true, false),
+    ?assertEqual(true, config:get_boolean("booleans", "key", false)),
+
+    config:set_boolean("booleans", "key", false, false),
+    ?assertEqual(false, config:get_boolean("booleans", "key", true)),
+
+    ?assertError(badarg, config:set_boolean("booleans", "key", "potato", false)),
+
+    ?assertEqual(true, config:get_boolean("booleans", "missing_key", true)),
+    ?assertEqual(false, config:get_boolean("booleans", "missing_key", false)),
+
+    config:delete("booleans", "key", false).
+
+should_crash_on_bad_defaults() ->
+    ?assertError(badarg, config:get("foo", "bar", <<"bad">>)),
+    ?assertError(badarg, config:get("foo", "bar", {42, 43})),
+    ?assertError(badarg, config:get("foo", "bar", #{junk => junk})).
 
 should_fail_to_get_binary_value() ->
     ?assertException(error, badarg, config:get(<<"a">>, <<"b">>, <<"c">>)).
@@ -586,15 +700,15 @@ should_remove_handler_when_pid_exits({_Apps, Pid}) ->
 
         % Monitor the config_listener_mon process
         {monitored_by, [Mon]} = process_info(Pid, monitored_by),
-        MonRef = erlang:monitor(process, Mon),
+        MonRef = monitor(process, Mon),
 
         % Kill the process synchronously
-        PidRef = erlang:monitor(process, Pid),
+        PidRef = monitor(process, Pid),
         exit(Pid, kill),
         receive
             {'DOWN', PidRef, _, _, _} -> ok
         after ?TIMEOUT ->
-            erlang:error({timeout, config_listener_death})
+            error({timeout, config_listener_death})
         end,
 
         % Wait for the config_listener_mon process to
@@ -602,7 +716,7 @@ should_remove_handler_when_pid_exits({_Apps, Pid}) ->
         receive
             {'DOWN', MonRef, _, _, normal} -> ok
         after ?TIMEOUT ->
-            erlang:error({timeout, config_listener_mon_death})
+            error({timeout, config_listener_mon_death})
         end,
 
         ?assertEqual(0, n_handlers())
@@ -614,7 +728,7 @@ should_stop_monitor_on_error({_Apps, Pid}) ->
 
         % Monitor the config_listener_mon process
         {monitored_by, [Mon]} = process_info(Pid, monitored_by),
-        MonRef = erlang:monitor(process, Mon),
+        MonRef = monitor(process, Mon),
 
         % Have the process throw an error
         ?assertEqual(ok, config:set("throw_error", "foo", "bar", false)),
@@ -628,7 +742,7 @@ should_stop_monitor_on_error({_Apps, Pid}) ->
         receive
             {'DOWN', MonRef, _, _, shutdown} -> ok
         after ?TIMEOUT ->
-            erlang:error({timeout, config_listener_mon_shutdown})
+            error({timeout, config_listener_mon_shutdown})
         end,
 
         ?assertEqual(0, n_handlers())
@@ -670,7 +784,7 @@ should_unsubscribe_when_subscriber_gone(_Subscription, {_Apps, Pid}) ->
         ?assert(is_process_alive(Pid)),
 
         % Monitor subscriber process
-        MonRef = erlang:monitor(process, Pid),
+        MonRef = monitor(process, Pid),
 
         exit(Pid, kill),
 
@@ -678,7 +792,7 @@ should_unsubscribe_when_subscriber_gone(_Subscription, {_Apps, Pid}) ->
         receive
             {'DOWN', MonRef, _, _, _} -> ok
         after ?TIMEOUT ->
-            erlang:error({timeout, config_notifier_shutdown})
+            error({timeout, config_notifier_shutdown})
         end,
 
         ?assertNot(is_process_alive(Pid)),
@@ -843,6 +957,52 @@ t_check_distributed_mode(_) ->
     persistent_term:put({config, node_name}, 'foo@127.0.0.1'),
     ?assertEqual({error, unexpected_distributed_mode}, config:check_distribution_mode()).
 
+config_stop_cleanup_test_() ->
+    {
+        foreach,
+        fun setup/0,
+        fun teardown/1,
+        [
+            fun should_stop/0,
+            fun should_cleanup_persistant_map/0,
+            fun should_handle_random_messages/0
+        ]
+    }.
+
+should_stop() ->
+    Pid = whereis(config),
+    Ref = monitor(process, Pid),
+    unlink(Pid),
+    config:stop(),
+    receive
+        {'DOWN', Ref, _, _, _} -> ok
+    end,
+    ?assertNot(is_process_alive(Pid)).
+
+should_cleanup_persistant_map() ->
+    Pid = whereis(config),
+    Ref = monitor(process, Pid),
+    unlink(Pid),
+    ?assertEqual(ok, config:set("foo", "bar", "baz", false)),
+    config:stop(),
+    receive
+        {'DOWN', Ref, _, _, _} -> ok
+    end,
+    ?assertEqual(not_found, persistent_term:get({config, cfgmap}, not_found)),
+    ?assertEqual(undefined, config:get("foo", "bar")).
+
+should_handle_random_messages() ->
+    Pid = whereis(config),
+    Ref = monitor(process, Pid),
+    unlink(Pid),
+    gen_server:cast(Pid, random_cast),
+    Pid ! random_message,
+    config:stop(),
+    receive
+        {'DOWN', Ref, _, _, _} -> ok
+    end,
+    ?assertNot(is_process_alive(Pid)).
+
 wait_config_get(Sec, Key, Val) ->
     test_util:wait(
         fun() ->
@@ -855,7 +1015,7 @@ wait_config_get(Sec, Key, Val) ->
 
 spawn_config_listener() ->
     Self = self(),
-    Pid = erlang:spawn(fun() ->
+    Pid = spawn(fun() ->
         ok = config:listen_for_changes(?MODULE, {self(), undefined}),
         Self ! registered,
         loop(undefined)
@@ -863,13 +1023,13 @@ spawn_config_listener() ->
     receive
         registered -> ok
     after ?TIMEOUT ->
-        erlang:error({timeout, config_handler_register})
+        error({timeout, config_handler_register})
     end,
     Pid.
 
 spawn_config_notifier(Subscription) ->
     Self = self(),
-    Pid = erlang:spawn(fun() ->
+    Pid = spawn(fun() ->
         ok = config:subscribe_for_changes(Subscription),
         Self ! registered,
         loop(undefined)
@@ -877,7 +1037,7 @@ spawn_config_notifier(Subscription) ->
     receive
         registered -> ok
     after ?TIMEOUT ->
-        erlang:error({timeout, config_handler_register})
+        error({timeout, config_handler_register})
     end,
     Pid.
 
@@ -890,7 +1050,7 @@ loop(undefined) ->
         {get_msg, _, _} = Msg ->
             loop(Msg);
         Msg ->
-            erlang:error({invalid_message, Msg})
+            error({invalid_message, Msg})
     end;
 loop({get_msg, From, Ref}) ->
     receive
@@ -899,7 +1059,7 @@ loop({get_msg, From, Ref}) ->
         {config_change, _, _, _, _} = Msg ->
             From ! {Ref, Msg};
         Msg ->
-            erlang:error({invalid_message, Msg})
+            error({invalid_message, Msg})
     end,
     loop(undefined);
 loop({config_msg, _} = Msg) ->
@@ -907,17 +1067,17 @@ loop({config_msg, _} = Msg) ->
         {get_msg, From, Ref} ->
             From ! {Ref, Msg};
         Msg ->
-            erlang:error({invalid_message, Msg})
+            error({invalid_message, Msg})
     end,
     loop(undefined).
 
 getmsg(Pid) ->
-    Ref = erlang:make_ref(),
+    Ref = make_ref(),
     Pid ! {get_msg, self(), Ref},
     receive
         {Ref, {config_msg, Msg}} -> Msg
     after ?TIMEOUT ->
-        erlang:error({timeout, config_msg})
+        error({timeout, config_msg})
     end.
 
 n_handlers() ->
@@ -952,7 +1112,7 @@ wait_process_restart(Name, Timeout, Delay, Started, _Prev) ->
     end.
 
 stop_sync(Pid, Timeout) when is_pid(Pid) ->
-    MRef = erlang:monitor(process, Pid),
+    MRef = monitor(process, Pid),
     try
         begin
             catch unlink(Pid),
@@ -965,7 +1125,7 @@ stop_sync(Pid, Timeout) when is_pid(Pid) ->
             end
         end
     after
-        erlang:demonitor(MRef, [flush])
+        demonitor(MRef, [flush])
     end;
 stop_sync(_, _) ->
     error(badarg).

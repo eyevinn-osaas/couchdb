@@ -42,6 +42,7 @@ interact with the local node's configuration.
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**
 
@@ -79,12 +80,11 @@ interact with the local node's configuration.
             },
             "chttpd": {
                 "allow_jsonp": "false",
-                "backlog": "512",
                 "bind_address": "0.0.0.0",
                 "port": "5984",
                 "require_valid_user": "false",
                 "socket_options": "[{sndbuf, 262144}, {nodelay, true}]",
-                "server_options": "[{recbuf, undefined}]",
+                "server_options": "[{recbuf, undefined}, {acceptor_pool_size, 32}, {max, 65536}]",
                 "secure_rewrites": "true"
             },
             "httpd": {
@@ -134,6 +134,7 @@ interact with the local node's configuration.
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -180,6 +181,7 @@ interact with the local node's configuration.
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
 
     **Request**:
 
@@ -225,6 +227,7 @@ interact with the local node's configuration.
     :code 200: Request completed successfully
     :code 400: Invalid JSON request body
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 500: Error setting configuration
 
     **Request**:
@@ -266,6 +269,7 @@ interact with the local node's configuration.
                            - :mimetype:`text/plain; charset=utf-8`
     :code 200: Request completed successfully
     :code 401: CouchDB Server Administrator privileges required
+    :code 403: Insufficient permissions / :ref:`Too many requests with invalid credentials<error/403>`
     :code 404: Specified configuration option not found
 
     **Request**:

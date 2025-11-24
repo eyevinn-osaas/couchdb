@@ -20,9 +20,11 @@
 
 setup() ->
     {ok, Fd} = couch_file:open(?tempfile(), [create, overwrite]),
+    meck:new(file, [passthrough, unstick]),
     Fd.
 
 teardown(Fd) ->
+    meck:unload(file),
     case is_process_alive(Fd) of
         true -> ok = couch_file:close(Fd);
         false -> ok
@@ -65,12 +67,68 @@ should_close_file_properly() ->
 should_create_empty_new_files(Fd) ->
     ?_assertMatch({ok, 0}, couch_file:bytes(Fd)).
 
+cfile_setup() ->
+    test_util:start_couch().
+
+cfile_teardown(Ctx) ->
+    erase(io_priority),
+    config:delete("couchdb", "use_cfile", false),
+    config:delete("couchdb", "cfile_skip_ioq", false),
+    config:delete("ioq.bypass", "read", false),
+    test_util:stop_couch(Ctx).
+
+cfile_enable_disable_test_() ->
+    {
+        foreach,
+        fun cfile_setup/0,
+        fun cfile_teardown/1,
+        [
+            ?TDEF_FE(t_cfile_default),
+            ?TDEF_FE(t_cfile_enabled),
+            ?TDEF_FE(t_cfile_disabled),
+            ?TDEF_FE(t_cfile_with_ioq_bypass),
+            ?TDEF_FE(t_cfile_without_ioq_bypass)
+        ]
+    }.
+
+t_cfile_default(_) ->
+    t_can_open_read_and_write().
+
+t_cfile_enabled(_) ->
+    % This is the default, but we'll just test when we
+    % explicitly set to "true" here
+    config:set("couchdb", "use_cfile", "true", false),
+    t_can_open_read_and_write().
+
+t_cfile_disabled(_) ->
+    config:set("couchdb", "use_cfile", "false", false),
+    t_can_open_read_and_write().
+
+t_cfile_with_ioq_bypass(_) ->
+    config:set("couchdb", "use_cfile", "true", false),
+    config:set("couchdb", "cfile_skip_ioq", "true", false),
+    config:set("ioq.bypass", "read", "true", false),
+    t_can_open_read_and_write().
+
+t_cfile_without_ioq_bypass(_) ->
+    config:set("couchdb", "use_cfile", "true", false),
+    config:set("couchdb", "cfile_skip_ioq", "false", false),
+    config:set("ioq.bypass", "read", "true", false),
+    t_can_open_read_and_write().
+
+t_can_open_read_and_write() ->
+    {ok, Fd} = couch_file:open(?tempfile(), [create, overwrite]),
+    ioq:set_io_priority({interactive, <<"somedb">>}),
+    ?assertMatch({ok, 0, _}, couch_file:append_term(Fd, foo)),
+    ?assertEqual({ok, foo}, couch_file:pread_term(Fd, 0)),
+    ok = couch_file:close(Fd).
+
 read_write_test_() ->
     {
         "Common file read/write tests",
         {
             setup,
-            fun() -> test_util:start_couch() end,
+            fun test_util:start_couch/0,
             fun test_util:stop_couch/1,
             {
                 foreach,
@@ -80,15 +138,26 @@ read_write_test_() ->
                     ?TDEF_FE(should_increase_file_size_on_write),
                     ?TDEF_FE(should_return_current_file_size_on_write),
                     ?TDEF_FE(should_write_and_read_term),
+                    ?TDEF_FE(should_read_write_multiple_terms),
                     ?TDEF_FE(should_write_and_read_binary),
                     ?TDEF_FE(should_write_and_read_large_binary),
                     ?TDEF_FE(should_return_term_as_binary_for_reading_binary),
                     ?TDEF_FE(should_read_term_written_as_binary),
-                    ?TDEF_FE(should_read_iolist),
                     ?TDEF_FE(should_fsync),
+                    ?TDEF_FE(should_fsync_by_path),
                     ?TDEF_FE(should_update_fsync_stats),
                     ?TDEF_FE(should_not_read_beyond_eof),
-                    ?TDEF_FE(should_truncate)
+                    ?TDEF_FE(should_not_read_beyond_eof_when_externally_truncated),
+                    ?TDEF_FE(should_catch_pread_failure),
+                    ?TDEF_FE(should_truncate),
+                    ?TDEF_FE(should_set_db_pid),
+                    ?TDEF_FE(should_open_read_only),
+                    ?TDEF_FE(should_apply_overwrite_create_option),
+                    ?TDEF_FE(should_error_on_creation_if_exists),
+                    ?TDEF_FE(should_close_on_idle),
+                    ?TDEF_FE(should_crash_on_unexpected_cast),
+                    ?TDEF_FE(should_handle_pread_iolist_upgrade_clause),
+                    ?TDEF_FE(should_handle_append_bin_upgrade_clause)
                 ]
             }
         }
@@ -108,9 +177,16 @@ should_write_and_read_term(Fd) ->
     {ok, Pos, _} = couch_file:append_term(Fd, foo),
     ?assertMatch({ok, foo}, couch_file:pread_term(Fd, Pos)).
 
+should_read_write_multiple_terms(Fd) ->
+    {ok, [{Pos1, _}, {Pos2, _}]} = couch_file:append_terms(Fd, [foo, bar]),
+    ?assertMatch({ok, [bar, foo]}, couch_file:pread_terms(Fd, [Pos2, Pos1])).
+
 should_write_and_read_binary(Fd) ->
-    {ok, Pos, _} = couch_file:append_binary(Fd, <<"fancy!">>),
-    ?assertMatch({ok, <<"fancy!">>}, couch_file:pread_binary(Fd, Pos)).
+    {ok, Pos1, _} = couch_file:append_binary(Fd, <<"fancy!">>),
+    ?assertMatch({ok, <<"fancy!">>}, couch_file:pread_binary(Fd, Pos1)),
+    {ok, Pos2, _} = couch_file:append_binary(Fd, ["foo", $m, <<"bam">>]),
+    {ok, Bin} = couch_file:pread_binary(Fd, Pos2),
+    ?assertMatch(<<"foombam">>, Bin).
 
 should_return_term_as_binary_for_reading_binary(Fd) ->
     {ok, Pos, _} = couch_file:append_term(Fd, foo),
@@ -126,15 +202,15 @@ should_write_and_read_large_binary(Fd) ->
     {ok, Pos, _} = couch_file:append_binary(Fd, BigBin),
     ?assertMatch({ok, BigBin}, couch_file:pread_binary(Fd, Pos)).
 
-should_read_iolist(Fd) ->
-    %% append_binary == append_iolist?
-    %% Possible bug in pread_iolist or iolist() -> append_binary
-    {ok, Pos, _} = couch_file:append_binary(Fd, ["foo", $m, <<"bam">>]),
-    {ok, IoList} = couch_file:pread_iolist(Fd, Pos),
-    ?assertMatch(<<"foombam">>, iolist_to_binary(IoList)).
-
 should_fsync(Fd) ->
     ?assertMatch(ok, couch_file:sync(Fd)).
+
+should_fsync_by_path(Fd) ->
+    {_, Path} = couch_file:process_info(Fd),
+    Count1 = couch_stats:sample([fsync, count]),
+    ?assertMatch(ok, couch_file:sync(Path)),
+    Count2 = couch_stats:sample([fsync, count]),
+    ?assert(Count2 > Count1).
 
 should_update_fsync_stats(Fd) ->
     Count0 = couch_stats:sample([fsync, count]),
@@ -159,9 +235,35 @@ should_not_read_beyond_eof(_) ->
     ok = file:pwrite(Io, Pos, <<0:1/integer, DoubleBin:31/integer>>),
     file:close(Io),
     unlink(Fd),
-    ExpectExit = {bad_return_value, {read_beyond_eof, Filepath}},
-    ExpectError = {badmatch, {'EXIT', ExpectExit}},
-    ?assertError(ExpectError, couch_file:pread_binary(Fd, Pos)),
+    ?assertMatch(
+        {error, {read_beyond_eof, Filepath, _, _, _, _}}, couch_file:pread_binary(Fd, Pos)
+    ),
+    catch file:close(Fd).
+
+should_not_read_beyond_eof_when_externally_truncated(_) ->
+    {ok, Fd} = couch_file:open(?tempfile(), [create, overwrite]),
+    Bin = list_to_binary(lists:duplicate(100, 0)),
+    {ok, Pos, _Size} = couch_file:append_binary(Fd, Bin),
+    {_, Filepath} = couch_file:process_info(Fd),
+    %% corrupt db file by truncating it
+    {ok, Io} = file:open(Filepath, [read, write, binary]),
+    % 4 (len) + 1 byte
+    {ok, _} = file:position(Io, Pos + 5),
+    ok = file:truncate(Io),
+    file:close(Io),
+    unlink(Fd),
+    ?assertMatch(
+        {error, {read_beyond_eof, Filepath, _, _, _, _}}, couch_file:pread_binary(Fd, Pos)
+    ),
+    catch file:close(Fd).
+
+should_catch_pread_failure(_) ->
+    {ok, Fd} = couch_file:open(?tempfile(), [create, overwrite]),
+    {ok, Pos, _Size} = couch_file:append_binary(Fd, <<"x">>),
+    {_, Filepath} = couch_file:process_info(Fd),
+    meck:expect(file, pread, 2, {error, einval}),
+    unlink(Fd),
+    ?assertMatch({error, {pread, Filepath, einval, {0, _}}}, couch_file:pread_terms(Fd, [Pos])),
     catch file:close(Fd).
 
 should_truncate(Fd) ->
@@ -172,45 +274,132 @@ should_truncate(Fd) ->
     ok = couch_file:truncate(Fd, Size),
     ?assertMatch({ok, foo}, couch_file:pread_term(Fd, 0)).
 
-pread_limit_test_() ->
-    {
-        "Read limit tests",
-        {
-            setup,
-            fun() ->
-                Ctx = test_util:start_couch([ioq]),
-                config:set("couchdb", "max_pread_size", "50000", _Persist = false),
-                Ctx
-            end,
-            fun(Ctx) ->
-                config:delete("couchdb", "max_pread_size", _Persist = false),
-                test_util:stop_couch(Ctx)
-            end,
-            {
-                foreach,
-                fun setup/0,
-                fun teardown/1,
-                [
-                    ?TDEF_FE(should_increase_file_size_on_write),
-                    ?TDEF_FE(should_return_current_file_size_on_write),
-                    ?TDEF_FE(should_write_and_read_term),
-                    ?TDEF_FE(should_write_and_read_binary),
-                    ?TDEF_FE(should_not_read_more_than_pread_limit)
-                ]
-            }
-        }
-    }.
+should_set_db_pid(Fd) ->
+    FakeDbFun = fun() ->
+        receive
+            Reason -> exit(Reason)
+        end
+    end,
+    FakeDbPid1 = spawn(FakeDbFun),
+    ?assertEqual(ok, couch_file:set_db_pid(Fd, FakeDbPid1)),
+    % Now replace it with another one
+    FakeDbPid2 = spawn(FakeDbFun),
+    ?assertEqual(ok, couch_file:set_db_pid(Fd, FakeDbPid2)),
+    FakeDbPid1 ! die,
+    ?assertEqual(ok, couch_file:sync(Fd)),
+    ?assert(is_process_alive(Fd)),
+    % Can't monitor the couch_file or it won't register as idle and won't exit
+    FakeDbPid2 ! die,
+    test_util:wait(
+        fun() ->
+            case is_process_alive(Fd) of
+                true -> wait;
+                false -> ok
+            end
+        end,
+        5000,
+        100
+    ),
+    ?assertNot(is_process_alive(Fd)).
 
-should_not_read_more_than_pread_limit(_) ->
-    {ok, Fd} = couch_file:open(?tempfile(), [create, overwrite]),
-    {_, Filepath} = couch_file:process_info(Fd),
-    BigBin = list_to_binary(lists:duplicate(100000, 0)),
-    {ok, Pos, _Size} = couch_file:append_binary(Fd, BigBin),
-    unlink(Fd),
-    ExpectExit = {bad_return_value, {exceed_pread_limit, Filepath, 50000}},
-    ExpectError = {badmatch, {'EXIT', ExpectExit}},
-    ?assertError(ExpectError, couch_file:pread_binary(Fd, Pos)),
-    catch file:close(Fd).
+should_open_read_only(Fd) ->
+    {_, Path} = couch_file:process_info(Fd),
+    {ok, Pos, _} = couch_file:append_term(Fd, foo),
+    {ok, Fd1} = couch_file:open(Path, [read_only]),
+    ?assertEqual({ok, foo}, couch_file:pread_term(Fd1, Pos)),
+    ?assertMatch({error, _}, couch_file:append_binary(Fd1, <<"bar">>)),
+    ?assertMatch({error, _}, couch_file:append_term(Fd1, bar)),
+    ?assertMatch({error, _}, couch_file:append_terms(Fd1, [bar, baz])),
+    catch couch_file:close(Fd1).
+
+should_apply_overwrite_create_option(Fd) ->
+    {_, Path} = couch_file:process_info(Fd),
+    {ok, Pos, _} = couch_file:append_term(Fd, foo),
+    ?assertEqual(ok, couch_file:close(Fd)),
+    {ok, Fd1} = couch_file:open(Path, [create, overwrite]),
+    unlink(Fd1),
+    ?assertMatch(
+        {error, {read_beyond_eof, Path, Pos, _, _, _}},
+        couch_file:pread_term(Fd1, Pos)
+    ).
+
+should_error_on_creation_if_exists(Fd) ->
+    {_, Path} = couch_file:process_info(Fd),
+    {ok, _, _} = couch_file:append_term(Fd, foo),
+    ?assertEqual(ok, couch_file:close(Fd)),
+    ?assertEqual({error, eexist}, couch_file:open(Path, [create])).
+
+should_close_on_idle(Fd) ->
+    % If something is monitoring it, it's considered "not idle" so shouldn't close
+    Ref = monitor(process, Fd),
+    Fd ! maybe_close,
+    ?assertEqual(ok, couch_file:sync(Fd)),
+    ?assert(true, is_process_alive(Fd)),
+    demonitor(Ref, [flush]),
+    % Nothing is monitoring it, now it should close
+    Fd ! maybe_close,
+    test_util:wait(
+        fun() ->
+            case is_process_alive(Fd) of
+                true -> wait;
+                false -> ok
+            end
+        end,
+        5000,
+        100
+    ),
+    ?assertNot(is_process_alive(Fd)).
+
+should_crash_on_unexpected_cast(Fd) ->
+    % Crash a newly opened one as Fd is linked to the test process
+    {_, Path} = couch_file:process_info(Fd),
+    {ok, Fd1} = couch_file:open(Path, [read_only]),
+    true = unlink(Fd1),
+    Ref = monitor(process, Fd1),
+    ok = gen_server:cast(Fd1, potato),
+    receive
+        {'DOWN', Ref, _, _, Reason} ->
+            ?assertEqual({invalid_cast, potato}, Reason)
+    end.
+
+% Remove this test when removing pread_iolist compatibility clause for online
+% upgrades from couch_file
+%
+should_handle_pread_iolist_upgrade_clause(Fd) ->
+    Bin = <<"bin">>,
+    {ok, Pos, _} = couch_file:append_binary(Fd, Bin),
+    ResList = gen_server:call(Fd, {pread_iolists, [Pos]}, infinity),
+    ?assertMatch({ok, [{_, _}]}, ResList),
+    {ok, [{IoList1, Checksum1}]} = ResList,
+    ?assertEqual(Bin, iolist_to_binary(IoList1)),
+    ?assertEqual(<<>>, Checksum1),
+    ResSingle = gen_server:call(Fd, {pread_iolist, Pos}, infinity),
+    ?assertMatch({ok, _, _}, ResSingle),
+    {ok, IoList2, Checksum2} = ResSingle,
+    ?assertEqual(Bin, iolist_to_binary(IoList2)),
+    ?assertEqual(<<>>, Checksum2).
+
+% Remove this test when removing append_bin compatibility clause for online
+% upgrades from couch_file
+%
+should_handle_append_bin_upgrade_clause(Fd) ->
+    Bin = <<"bin">>,
+    Chunk = couch_file:assemble_file_chunk_and_checksum(Bin),
+    ResList = gen_server:call(Fd, {append_bins, [Chunk]}, infinity),
+    ?assertMatch({ok, [_]}, ResList),
+    {ok, [{Pos1, Len1}]} = ResList,
+    ?assertEqual({ok, Bin}, couch_file:pread_binary(Fd, Pos1)),
+    ?assert(is_integer(Len1)),
+    % size of binary + checksum
+    ?assert(Len1 > byte_size(Bin) + 16),
+    ResSingle = gen_server:call(Fd, {append_bin, Chunk}, infinity),
+    ?assertMatch({ok, _, _}, ResSingle),
+    {ok, Pos2, Len2} = ResSingle,
+    ?assert(is_integer(Len2)),
+    % size of binary + checksum
+    ?assert(Len2 > byte_size(Bin) + 16),
+    ?assertEqual(Pos2, Len1),
+    ?assertEqual({ok, Bin}, couch_file:pread_binary(Fd, Pos2)).
 
 header_test_() ->
     {
@@ -605,8 +794,7 @@ setup_checksum() ->
 teardown_checksum({Ctx, Path}) ->
     file:delete(Path),
     meck:unload(),
-    test_util:stop_couch(Ctx),
-    couch_file:reset_checksum_persistent_term_config().
+    test_util:stop_couch(Ctx).
 
 t_write_read_xxhash_checksums({_Ctx, Path}) ->
     enable_xxhash(),
@@ -745,12 +933,10 @@ t_can_detect_block_corruption_with_legacy_checksum({_Ctx, Path}) ->
     catch couch_file:close(Fd1).
 
 enable_xxhash() ->
-    couch_file:reset_checksum_persistent_term_config(),
     reset_legacy_checksum_stats(),
     config:set("couchdb", "write_xxhash_checksums", "true", _Persist = false).
 
 disable_xxhash() ->
-    couch_file:reset_checksum_persistent_term_config(),
     reset_legacy_checksum_stats(),
     config:set("couchdb", "write_xxhash_checksums", "false", _Persist = false).
 
@@ -760,3 +946,86 @@ legacy_stats() ->
 reset_legacy_checksum_stats() ->
     Counter = couch_stats:sample([couchdb, legacy_checksums]),
     couch_stats:decrement_counter([couchdb, legacy_checksums], Counter).
+
+write_header_sync_test_() ->
+    {
+        "Test sync options for write_header",
+        {
+            setup,
+            fun test_util:start_couch/0,
+            fun test_util:stop_couch/1,
+            {
+                foreach,
+                fun unlinked_setup/0,
+                fun teardown/1,
+                [
+                    ?TDEF_FE(should_handle_sync_option),
+                    ?TDEF_FE(should_not_sync_by_default),
+                    ?TDEF_FE(should_handle_error_of_the_first_sync),
+                    ?TDEF_FE(should_handle_error_of_the_second_sync),
+                    ?TDEF_FE(should_handle_error_of_the_file_write)
+                ]
+            }
+        }
+    }.
+
+unlinked_setup() ->
+    Self = self(),
+    ReqId = make_ref(),
+    meck:new(file, [passthrough, unstick]),
+    spawn(fun() ->
+        {ok, Fd} = couch_file:open(?tempfile(), [create, overwrite]),
+        Self ! {ReqId, Fd}
+    end),
+    receive
+        {ReqId, Result} -> Result
+    end.
+
+should_handle_sync_option(Fd) ->
+    ok = couch_file:write_header(Fd, {<<"some_data">>, 32}, [sync]),
+    ?assertMatch({ok, {<<"some_data">>, 32}}, couch_file:read_header(Fd)),
+    ?assertEqual(2, meck:num_calls(file, datasync, ['_'])),
+    ok.
+
+should_not_sync_by_default(Fd) ->
+    ok = couch_file:write_header(Fd, {<<"some_data">>, 32}),
+    ?assertMatch({ok, {<<"some_data">>, 32}}, couch_file:read_header(Fd)),
+    ?assertEqual(0, meck:num_calls(file, datasync, ['_'])),
+    ok.
+
+should_handle_error_of_the_first_sync(Fd) ->
+    meck:expect(
+        file,
+        datasync,
+        ['_'],
+        meck:val({error, terminated})
+    ),
+    ?assertEqual({error, terminated}, couch_file:write_header(Fd, {<<"some_data">>, 32}, [sync])),
+    ?assertEqual(1, meck:num_calls(file, datasync, ['_'])),
+    ok.
+
+should_handle_error_of_the_second_sync(Fd) ->
+    meck:expect(
+        file,
+        datasync,
+        ['_'],
+        meck:seq([
+            meck:val(ok),
+            meck:val({error, terminated})
+        ])
+    ),
+    ?assertEqual({error, terminated}, couch_file:write_header(Fd, {<<"some_data">>, 32}, [sync])),
+    ?assertEqual(2, meck:num_calls(file, datasync, ['_'])),
+    ok.
+
+should_handle_error_of_the_file_write(Fd) ->
+    meck:expect(
+        file,
+        write,
+        ['_', '_'],
+        meck:val({error, terminated})
+    ),
+    ?assertEqual({error, terminated}, couch_file:write_header(Fd, {<<"some_data">>, 32}, [sync])),
+    ?assertEqual(1, meck:num_calls(file, datasync, ['_'])),
+    ?assertEqual(1, meck:num_calls(file, write, ['_', '_'])),
+    ok.

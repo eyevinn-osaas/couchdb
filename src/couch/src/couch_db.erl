@@ -56,6 +56,11 @@
     get_oldest_purge_seq/1,
     get_purge_infos_limit/1,
 
+    time_seq_since/2,
+    time_seq_histogram/1,
+    get_time_seq/1,
+    set_time_seq/2,
+
     is_db/1,
     is_system_db/1,
     is_clustered/1,
@@ -66,6 +71,9 @@
     set_purge_infos_limit/2,
     set_security/2,
     set_user_ctx/2,
+
+    get_props/1,
+    update_props/3,
 
     load_validation_funs/1,
     reload_validation_funs/1,
@@ -112,6 +120,7 @@
     fold_changes/4,
     fold_changes/5,
     count_changes_since/2,
+    fold_purge_infos/3,
     fold_purge_infos/4,
     fold_purge_infos/5,
 
@@ -150,6 +159,11 @@
 ).
 % Purge client max lag window in seconds (defaulting to 24 hours)
 -define(PURGE_LAG_SEC, 86400).
+
+% DB props which cannot be dynamically updated after db creation
+-define(PROP_PARTITIONED, partitioned).
+-define(PROP_HASH, hash).
+-define(STATIC_PROPS, [?PROP_PARTITIONED, ?PROP_HASH]).
 
 start_link(Engine, DbName, Filepath, Options) ->
     Arg = {Engine, DbName, Filepath, Options},
@@ -226,9 +240,9 @@ is_clustered(#db{}) ->
 is_clustered(?OLD_DB_REC = Db) ->
     ?OLD_DB_MAIN_PID(Db) == undefined.
 
-is_partitioned(#db{options = Options}) ->
-    Props = couch_util:get_value(props, Options, []),
-    couch_util:get_value(partitioned, Props, false).
+is_partitioned(#db{} = Db) ->
+    Props = get_props(Db),
+    couch_util:get_value(?PROP_PARTITIONED, Props, false).
 
 close(#db{} = Db) ->
     ok = couch_db_engine:decref(Db);
@@ -253,7 +267,7 @@ monitored_by(Db) ->
     end.
 
 monitor(#db{main_pid = MainPid}) ->
-    erlang:monitor(process, MainPid).
+    monitor(process, MainPid).
 
 start_compact(#db{} = Db) ->
     gen_server:call(Db#db.main_pid, start_compact).
@@ -268,7 +282,7 @@ wait_for_compaction(#db{main_pid = Pid} = Db, Timeout) ->
     Start = os:timestamp(),
     case gen_server:call(Pid, compactor_pid) of
         CPid when is_pid(CPid) ->
-            Ref = erlang:monitor(process, CPid),
+            Ref = monitor(process, CPid),
             receive
                 {'DOWN', Ref, _, _, normal} when Timeout == infinity ->
                     wait_for_compaction(Db, Timeout);
@@ -278,7 +292,7 @@ wait_for_compaction(#db{main_pid = Pid} = Db, Timeout) ->
                 {'DOWN', Ref, _, _, Reason} ->
                     {error, Reason}
             after Timeout ->
-                erlang:demonitor(Ref, [flush]),
+                demonitor(Ref, [flush]),
                 {error, Timeout}
             end;
         _ ->
@@ -419,7 +433,7 @@ purge_docs(#db{main_pid = Pid} = Db, UUIDsIdsRevs, Options) ->
     % Gather any existing purges with the same UUIDs
     UUIDs = element(1, lists:unzip3(UUIDsIdsRevs1)),
     Old1 = get_purge_infos(Db, UUIDs),
-    Old2 = maps:from_list([{UUID, {Id, Revs}} || {_, UUID, Id, Revs} <- Old1]),
+    Old2 = #{UUID => {Id, Revs} || {_, UUID, Id, Revs} <- Old1},
     % Filter out all the purges which have already been processed
     FilterCheckFun = fun({UUID, Id, Revs}) ->
         case maps:is_key(UUID, Old2) of
@@ -477,7 +491,7 @@ get_minimum_purge_seq(#db{} = Db) ->
                     CS when is_integer(CS) ->
                         case purge_client_exists(DbName, DocId, Props) of
                             true ->
-                                {ok, erlang:min(CS, SeqAcc)};
+                                {ok, min(CS, SeqAcc)};
                             false ->
                                 Fmt1 =
                                     "Missing or stale purge doc '~s' on ~p "
@@ -488,7 +502,7 @@ get_minimum_purge_seq(#db{} = Db) ->
                     _ ->
                         Fmt2 = "Invalid purge doc '~s' on ~p with purge_seq '~w'",
                         couch_log:error(Fmt2, [DocId, DbName, ClientSeq]),
-                        {ok, erlang:min(OldestPurgeSeq, SeqAcc)}
+                        {ok, min(OldestPurgeSeq, SeqAcc)}
                 end;
             _ ->
                 {stop, SeqAcc}
@@ -502,7 +516,7 @@ get_minimum_purge_seq(#db{} = Db) ->
     FinalSeq =
         case MinIdxSeq < PurgeSeq - PurgeInfosLimit of
             true -> MinIdxSeq;
-            false -> erlang:max(0, PurgeSeq - PurgeInfosLimit)
+            false -> max(0, PurgeSeq - PurgeInfosLimit)
         end,
     % Log a warning if we've got a purge sequence exceeding the
     % configured threshold.
@@ -567,6 +581,25 @@ get_oldest_purge_seq(#db{} = Db) ->
 get_purge_infos_limit(#db{} = Db) ->
     couch_db_engine:get_purge_infos_limit(Db).
 
+time_seq_since(#db{time_seq = TSeq} = Db, Time) when is_integer(Time), Time >= 0 ->
+    case couch_time_seq:since(TSeq, Time) of
+        Seq when is_integer(Seq) -> Seq;
+        now -> couch_db:get_update_seq(Db)
+    end.
+
+time_seq_histogram(#db{time_seq = TSeq} = Db) ->
+    UpdateSeq = couch_db:get_update_seq(Db),
+    couch_time_seq:histogram(TSeq, UpdateSeq).
+
+get_time_seq(#db{time_seq = TSeq}) ->
+    TSeq.
+
+set_time_seq(#db{main_pid = Pid} = Db, #{} = TSeq) ->
+    check_is_admin(Db),
+    gen_server:call(Pid, {set_time_seq, TSeq}, infinity);
+set_time_seq(_Db, _TSeq) ->
+    throw(invalid_time_seq).
+
 get_pid(#db{main_pid = Pid}) ->
     Pid.
 
@@ -625,11 +658,7 @@ get_db_info(Db) ->
             undefined -> null;
             Else1 -> Else1
         end,
-    Props =
-        case couch_db_engine:get_props(Db) of
-            undefined -> null;
-            Else2 -> {Else2}
-        end,
+    Props = get_props(Db),
     InfoList = [
         {db_name, Name},
         {engine, couch_db_engine:get_engine(Db)},
@@ -643,7 +672,7 @@ get_db_info(Db) ->
         {disk_format_version, DiskVersion},
         {committed_update_seq, CommittedUpdateSeq},
         {compacted_seq, CompactedSeq},
-        {props, Props},
+        {props, {Props}},
         {uuid, Uuid}
     ],
     {ok, InfoList}.
@@ -836,6 +865,24 @@ set_revs_limit(#db{main_pid = Pid} = Db, Limit) when Limit > 0 ->
 set_revs_limit(_Db, _Limit) ->
     throw(invalid_revs_limit).
 
+get_props(#db{options = Options}) ->
+    couch_util:get_value(props, Options, []).
+
+update_props(#db{main_pid = Pid} = Db, K, V) ->
+    check_is_admin(Db),
+    case lists:member(K, ?STATIC_PROPS) of
+        true ->
+            throw({bad_request, <<"cannot update static property">>});
+        false ->
+            Props = get_props(Db),
+            Props1 =
+                case V of
+                    undefined -> lists:keydelete(K, 1, Props);
+                    _ -> lists:keystore(K, 1, Props, {K, V})
+                end,
+            gen_server:call(Pid, {set_props, Props1}, infinity)
+    end.
+
 name(#db{name = Name}) ->
     Name;
 name(?OLD_DB_REC = Db) ->
@@ -976,7 +1023,7 @@ load_validation_funs(#db{main_pid = Pid, name = <<"shards/", _/binary>>} = Db) -
             Funs;
         {'DOWN', Ref, _, _, {database_does_not_exist, _StackTrace}} ->
             ok = couch_server:close_db_if_idle(Db#db.name),
-            erlang:error(database_does_not_exist);
+            error(database_does_not_exist);
         {'DOWN', Ref, _, _, Reason} ->
             couch_log:error("could not load validation funs ~p", [Reason]),
             throw(internal_server_error)
@@ -1254,7 +1301,7 @@ new_revid(#doc{body = Body, revs = {OldStart, OldRevs}, atts = Atts, deleted = D
     case DigestedAtts of
         Atts2 when length(Atts) =/= length(Atts2) ->
             % We must have old style non-md5 attachments
-            ?l2b(integer_to_list(couch_util:rand32()));
+            integer_to_binary(couch_util:rand32());
         Atts2 ->
             OldRev =
                 case OldRevs of
@@ -1339,8 +1386,13 @@ update_docs(Db, Docs0, Options, ?REPLICATED_CHANGES) ->
     {ok, DocErrors};
 update_docs(Db, Docs0, Options, ?INTERACTIVE_EDIT) ->
     BlockInteractiveDatabaseWrites = couch_disk_monitor:block_interactive_database_writes(),
+    InternalReplication =
+        case get(io_priority) of
+            {internal_repl, _} -> true;
+            _Else -> false
+        end,
     if
-        BlockInteractiveDatabaseWrites ->
+        not InternalReplication andalso BlockInteractiveDatabaseWrites ->
             {ok, [{insufficient_storage, <<"database_dir is too full">>} || _ <- Docs0]};
         true ->
             update_docs_interactive(Db, Docs0, Options)
@@ -1465,7 +1517,7 @@ write_and_commit(
 ) ->
     DocBuckets = prepare_doc_summaries(Db, DocBuckets1),
     ReplicatedChanges = lists:member(?REPLICATED_CHANGES, Options),
-    MRef = erlang:monitor(process, Pid),
+    MRef = monitor(process, Pid),
     try
         Pid ! {update_docs, self(), DocBuckets, LocalDocs, ReplicatedChanges},
         case collect_results_with_metrics(Pid, MRef, []) of
@@ -1489,7 +1541,7 @@ write_and_commit(
                 end
         end
     after
-        erlang:demonitor(MRef, [flush])
+        demonitor(MRef, [flush])
     end.
 
 prepare_doc_summaries(Db, BucketList) ->
@@ -1750,12 +1802,12 @@ validate_epochs(Epochs) ->
     %% Assert uniqueness.
     case length(Epochs) == length(lists:ukeysort(2, Epochs)) of
         true -> ok;
-        false -> erlang:error(duplicate_epoch)
+        false -> error(duplicate_epoch)
     end,
     %% Assert order.
     case Epochs == lists:sort(fun({_, A}, {_, B}) -> B =< A end, Epochs) of
         true -> ok;
-        false -> erlang:error(epoch_order)
+        false -> error({epoch_order, Epochs})
     end.
 
 is_prefix(Pattern, Subject) ->
@@ -1804,6 +1856,10 @@ fold_changes(Db, StartSeq, UserFun, UserAcc) ->
 
 fold_changes(Db, StartSeq, UserFun, UserAcc, Opts) ->
     couch_db_engine:fold_changes(Db, StartSeq, UserFun, UserAcc, Opts).
+
+fold_purge_infos(Db, Fun, Acc) ->
+    StartPurgeSeq = max(0, couch_db:get_oldest_purge_seq(Db) - 1),
+    fold_purge_infos(Db, StartPurgeSeq, Fun, Acc, []).
 
 fold_purge_infos(Db, StartPurgeSeq, Fun, Acc) ->
     fold_purge_infos(Db, StartPurgeSeq, Fun, Acc, []).
@@ -2347,7 +2403,10 @@ is_owner_test() ->
     ?assertNot(is_owner(bar, 99, [{baz, 200}, {bar, 100}, {foo, 1}])),
     ?assertNot(is_owner(baz, 199, [{baz, 200}, {bar, 100}, {foo, 1}])),
     ?assertError(duplicate_epoch, validate_epochs([{foo, 1}, {bar, 1}])),
-    ?assertError(epoch_order, validate_epochs([{foo, 100}, {bar, 200}])).
+    ?assertError(
+        {epoch_order, [{foo, 100}, {bar, 200}]},
+        validate_epochs([{foo, 100}, {bar, 200}])
+    ).
 
 to_binary(DbName) when is_list(DbName) ->
     ?l2b(DbName);
