@@ -18,7 +18,7 @@ WORKDIR /opt/couchdb
 
 RUN apt-get update && \
     apt-get -y install \
-    openssl python3
+    libicu72 libmozjs-78-0 openssl python3
     
 RUN adduser --system \
   --home /opt/couchdb \
